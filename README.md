@@ -1,44 +1,20 @@
 # jevy-vet
 
-An OpenCode plugin that checks a new test before the file is written. It calls TypeSafe Jev itself. You do not add a Jev MCP server.
+An OpenCode plugin that stops a weak test before the file is written.
 
-The first check is tests. The name is not limited to tests. Later checks can live in the same plugin.
+When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
-## What it blocks
+Today it only checks tests.
 
-It watches `write`, `edit`, and `apply_patch`. It only looks at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
+## Install
 
-A file with more than one test is judged one test at a time. One bad test blocks the write.
+OpenCode installs the npm package `jevy-vet` when it starts. You do not install it yourself.
 
-It blocks the write when Jev is sure a test fails one of these rules:
+### 1. Save your TypeSafe key
 
-- Its title promises a behavior that none of its assertions check.
-- It would still pass if the code returned null, an empty value, or zero.
-- The expected value is computed with the same logic as the code under test.
-- It replaces the code it tests with a mock or stub.
-- The code it tests is only a getter, a setter, or a constructor that stores fields.
+Put the key in `~/.config/opencode/jevy-vet.jsonc`, next to `opencode.json` or `opencode.jsonc`.
 
-Along with each test, Jev sees the rest of the test file's setup (imports and helpers) and the code under test. The plugin reads that code from the project folder. It follows relative imports in the test file and looks for the usual source file next to it: `foo.test.ts` → `foo.ts`, `__tests__/foo.ts` → `foo.ts`, `test_foo.py` → `foo.py`, a Go test's own package, and `src/test/…/FooTest.java` → `src/main/…/Foo.java`. It does not read outside the project folder, in `node_modules`, or other test files. A large file is cut to the imported definitions, or to its head and tail. If no code under test is found, the last three rules are not asked.
-
-Only the new test text is judged by these rules.
-
-### Test edits
-
-When an agent changes an existing test, with `edit`, a patch update or delete, or a `write` over a test file that is already on disk, comments are removed and the old check is compared with the new one.
-
-The edit is blocked when Jev is sure the check got weaker, was inverted or removed, has a changed expected value, or a test was removed without a replacement. A stronger check, the same check written differently, or a change that does not touch the check, is allowed. The message shows the old and new check, and tells the agent to fix the code, or to stop and ask you if the old test is wrong.
-
-If you asked for the change, it is allowed. The plugin keeps your last three messages in each session, in memory only, and sends them with a test edit so Jev can tell. Asking to fix a failure or to make the tests pass does not count. A subagent's prompt is written by another agent, so it never counts.
-
-A score below 0.8 is allowed. If Jev is unsure, the write is allowed. If TypeSafe is down, the write is allowed. If the config file is missing, unreadable, or has no `TYPESAFE_API_KEY`, the test write is blocked.
-
-It does not prove the test would catch a real bug. That needs a run, and for a stronger check, mutation testing. This plugin only reads the test text, the code around it, and, for an edit, your recent messages.
-
-## Add it to OpenCode
-
-The published npm package is `jevy-vet`. You do not install it yourself. OpenCode installs it when it starts.
-
-1. Put the TypeSafe key in `~/.config/opencode/jevy-vet.jsonc`, next to `opencode.json` or `opencode.jsonc`. If `$XDG_CONFIG_HOME` is set, use `$XDG_CONFIG_HOME/opencode/jevy-vet.jsonc` instead. `jevy-vet.json` is used only if the `.jsonc` file is missing.
+If `XDG_CONFIG_HOME` is set, use `$XDG_CONFIG_HOME/opencode/jevy-vet.jsonc` instead.
 
 ```jsonc
 {
@@ -46,11 +22,15 @@ The published npm package is `jevy-vet`. You do not install it yourself. OpenCod
 }
 ```
 
-Comments and a trailing comma are fine. `TYPESAFE_BASE_URL` is optional. If you leave it out, the plugin uses `https://api.typesafe.ai`.
+Comments and a trailing comma are fine. If the `.jsonc` file is missing, `jevy-vet.json` is used instead.
 
-The plugin does not read the key from the environment. A project file cannot override this one, so the key stays out of the repo.
+`TYPESAFE_BASE_URL` is optional. Leave it out to use `https://api.typesafe.ai`.
 
-2. Add `jevy-vet` to the plugin list. Use the project file `opencode.json` or `opencode.jsonc`, or the global file `~/.config/opencode/opencode.jsonc`.
+The plugin does not read the key from the environment. A file in the project cannot replace this one, so the key stays out of the repo.
+
+### 2. Turn the plugin on
+
+Add `jevy-vet` to the plugin list. Use the project file `opencode.json` or `opencode.jsonc`, or the global file `~/.config/opencode/opencode.jsonc`.
 
 ```json
 {
@@ -59,11 +39,70 @@ The plugin does not read the key from the environment. A project file cannot ove
 }
 ```
 
-To pin a version, use `"jevy-vet@1.2.3"`. Keep any plugins you already have. Add `jevy-vet` to that same list.
+Keep plugins you already have. Add `jevy-vet` to that same list. To lock a version, use `"jevy-vet@1.2.3"`.
 
-This package supports OpenCode 1 only. OpenCode 2 does not run an OpenCode 1 plugin. A config rename is not enough.
+This works with OpenCode 1 only. OpenCode 2 does not run an OpenCode 1 plugin. Changing the config will not make it run there.
 
-3. Quit OpenCode and start it again. A running session keeps the old config.
+### 3. Restart OpenCode
+
+Quit OpenCode and start it again. A session that is already open keeps the old config.
+
+## Which files
+
+It watches `write`, `edit`, and `apply_patch`. It only looks at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
+
+A file with more than one test is judged one test at a time. One bad test blocks the write.
+
+## New tests
+
+The write is blocked when Jev is sure a test fails one of these rules:
+
+- Its title promises a behavior that none of its assertions check.
+- It would still pass if the code returned null, an empty value, or zero.
+- The expected value is computed with the same logic as the code under test.
+- It replaces the code it tests with a mock or stub.
+- The code it tests is only a getter, a setter, or a constructor that stores fields.
+
+Only the new test text is judged. Jev also sees that file's setup and the code under test, as context. They are not judged.
+
+The plugin reads the code under test from the project folder. It follows relative imports and looks for the usual source file for that test. It does not read outside the project, inside `node_modules`, or other test files. A large file is cut to the imported definitions, or to its start and end. If none is found, the last three rules are skipped.
+
+## Changed tests
+
+This runs when an agent changes a test that is already on disk. That includes an `edit`, a patch that updates or deletes lines, or a `write` over an existing test file.
+
+Comments are removed first. Then the old check is compared with the new one.
+
+The edit is blocked when Jev is sure of any of these:
+
+- The check got weaker.
+- A check now expects the opposite, or was removed or turned off.
+- The expected value changed.
+- A test was removed and nothing replaced it.
+
+These are allowed:
+
+- A stronger check.
+- The same check, written a different way.
+- A change that does not touch the check.
+
+The message names the file and the test, and shows the lines that changed. It tells the agent to fix the code, or to stop and ask you if the old test is wrong. It will not suggest deleting the test.
+
+### When you asked for the change
+
+Your own words allow the edit. The plugin keeps your last three messages for that session, in memory only, and sends them with the edit so Jev can tell.
+
+Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
+
+## If Jev cannot decide
+
+The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
+
+The write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`.
+
+## What this does not do
+
+It does not run the test. It does not prove the test would catch a real bug. You still need to run the tests for that.
 
 ## Tests
 
