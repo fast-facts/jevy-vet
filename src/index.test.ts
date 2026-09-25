@@ -544,6 +544,46 @@ describe('plugin', () => {
       expect(hidden?.state.changes?.map(change => change.path)).toEqual(['src/config.ts']);
     });
   });
+  describe('stale-comment check', () => {
+    test('reads the comment and the docs before the tool runs, and adds the note after it ran', async () => {
+      const project = withProject({
+        'src/retry.ts': '// Tries the call up to 3 times.\nexport function retry(call: () => void): void {\n  for (let i = 0; i < 3; i += 1) call();\n}\n',
+        'docs/usage.md': '# Usage\n\n`retry` runs a call up to 3 times.\n',
+        'AGENTS.md': 'Keep `retry` short.\n',
+      });
+      const bodies: { state: { comments?: { path: string }[] }; questions: Record<string, unknown> }[] = [];
+      const fetchImpl: FakeFetch = (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as (typeof bodies)[number];
+        bodies.push(body);
+        const answers = 'c0_stale' in body.questions ? { c0_stale: { type: 'noul', noul: 0.9 } } : {};
+        return Promise.resolve(jsonResponse({ answers }));
+      };
+      try {
+        await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+          const args = { filePath: join(project, 'src/retry.ts'), oldString: '  for (let i = 0; i < 3; i += 1) call();', newString: '  for (let i = 0; i < 5; i += 1) call();' };
+          await expect(before(hooks, 'edit', args)).resolves.toBeUndefined();
+          writeFileSync(args.filePath, '// Tries the call up to 3 times.\nexport function retry(call: () => void): void {\n  for (let i = 0; i < 5; i += 1) call();\n}\n');
+          const output = { title: '', output: 'Edit applied', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'edit', sessionID: 's', callID: 'c', args }, output);
+          expect(output.output).toBe([
+            'Edit applied',
+            '',
+            'Jevy note: this change was made, but a comment or doc may no longer match it.',
+            '- src/retry.ts, function "retry"',
+            '  Stale comment: A comment or doc says something the changed code no longer does.',
+            '  comment: src/retry.ts:1 // Tries the call up to 3 times.',
+            '  code: src/retry.ts:3 for (let i = 0; i < 5; i += 1) call();',
+            '  next: Update the comment or doc to match the new code. If the code is what is wrong, fix it or ask the user.',
+            'Check it, and fix it if the note is right.',
+          ].join('\n'));
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      const stale = bodies.find(body => 'c0_stale' in body.questions);
+      expect(stale?.state.comments?.map(item => item.path)).toEqual(['src/retry.ts', 'docs/usage.md']);
+    });
+  });
   describe('special-case check', () => {
     test('finds the related test on disk and blocks the edit before it runs', async () => {
       const project = withProject({

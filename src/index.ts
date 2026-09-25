@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { type Block, checkClaims, checkHiddenErrors, checkInstructions, checkReuse, type Failure, review, shownPath, type Step } from './review.ts';
+import { type Block, checkClaims, checkHiddenErrors, checkInstructions, checkReuse, checkStaleDocs, type Failure, review, shownPath, type Step } from './review.ts';
 import { loadSettings } from './settings.ts';
 import { changesFrom, commandFrom } from './subjects.ts';
 
@@ -229,7 +229,8 @@ export default async function jevyVet(input: Input) {
       }).catch(() => undefined);
       const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
       const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [], lastFailure: failures.get(top) }).catch(() => undefined);
-      pending.set(hook.callID, Promise.all([instruction, reuse, hidden]).then(found => {
+      const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
+      pending.set(hook.callID, Promise.all([instruction, reuse, hidden, stale]).then(found => {
         const parts = [...notes];
         for (const note of found) if (note) parts.push(note);
         return parts.join('\n\n') || undefined;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { changesFrom, commandFrom, definitionsIn, editsFrom, isDefinitionFile, isGatePath, isTestSupport, literalsIn, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
+import { changesFrom, commandFrom, definitionsIn, editsFrom, isCommentLine, isDefinitionFile, isGatePath, isTestSupport, literalsIn, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
 describe('testFilesFrom', () => {
   test('splits a write into setup and one case per test', () => {
@@ -144,6 +144,13 @@ describe('stripComments', () => {
 
   test('drops Python hash comments but keeps a hash inside a string', () => {
     expect(stripComments('# changed to match output\nassert tag == "#1"  # ok', 'test_a.py')).toBe('assert tag == "#1"');
+  });
+});
+
+describe('isCommentLine', () => {
+  test('matches comment lines but not a Rust attribute or a shebang', () => {
+    expect(['// why', ' * @param a', '/** doc', '# note'].every(isCommentLine)).toBe(true);
+    expect(['#[derive(Debug)]', '#!/usr/bin/env node', 'return a; // why'].some(isCommentLine)).toBe(false);
   });
 });
 

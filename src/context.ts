@@ -348,6 +348,10 @@ const MAX_SOURCE_FILES = 2000;
 const MAX_LISTED_ENTRIES = 20_000;
 const MAX_SOURCE_FILE_CHARS = 200_000;
 const MAX_RELATED_TESTS = 10;
+const DOC_FILE = /\.mdx?$/i;
+const NOT_DOCS = new Set(['agents.md', 'claude.md', 'context.md', 'changelog.md', 'history.md']);
+const MAX_DOC_SECTIONS = 5;
+const MAX_DOC_SECTION_CHARS = 1500;
 
 export function isGenerated(path: string, text: string): boolean {
   return GENERATED_NAME.test(path) || GENERATED_MARK.test(text.slice(0, 500));
@@ -359,17 +363,56 @@ export interface SourceFile {
 }
 
 export function sourceFiles(disk: Disk, skip: Set<string>): SourceFile[] {
-  return projectFiles(disk, path => !isTestPath(path) && !skip.has(join(disk.root, path)));
+  return projectFiles(disk, path => isCodeFile(path) && !isTestPath(path) && !skip.has(join(disk.root, path)));
 }
 
 // Tests whose code under test, found the way contextFor finds it, includes this file.
 export function relatedTests(disk: Disk, sourcePath: string): SourceFile[] {
   const target = resolve(disk.root, sourcePath);
   const found: SourceFile[] = [];
-  for (const file of projectFiles(disk, isTestPath)) {
+  for (const file of projectFiles(disk, path => isCodeFile(path) && isTestPath(path))) {
     if (!candidates(file.path, file.text, disk).includes(target)) continue;
     found.push(file);
     if (found.length >= MAX_RELATED_TESTS) break;
+  }
+  return found;
+}
+
+export interface DocSection {
+  path: string;
+  // The first line in the section that names it.
+  line: number;
+  name: string;
+  text: string;
+}
+
+// Retrieval only, at most five. Instruction files and changelogs are skipped: they are the user's rules, or they are right to describe old behavior.
+export function docSections(disk: Disk, names: string[]): DocSection[] {
+  if (names.length === 0) return [];
+  const found: DocSection[] = [];
+  // `$` is a word in a function name, so a plain `\b` would split it.
+  const words = names.map(name => {
+    const escaped = name.replaceAll('$', '\\$');
+    return { name, pattern: new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`) };
+  });
+  const docs = projectFiles(disk, path => DOC_FILE.test(path) && !NOT_DOCS.has(basename(path).toLowerCase()));
+  for (const doc of docs) {
+    const lines = doc.text.split('\n');
+    const starts = [0];
+    for (let i = 1; i < lines.length; i += 1) {
+      if (/^#{1,6}\s/.test(lines[i] ?? '')) starts.push(i);
+    }
+    starts.push(lines.length);
+    for (let n = 0; n < starts.length - 1; n += 1) {
+      const start = starts[n] ?? 0;
+      const section = lines.slice(start, starts[n + 1]);
+      for (const { name, pattern } of words) {
+        const at = section.findIndex(line => pattern.test(line));
+        if (at < 0) continue;
+        found.push({ path: doc.path, line: start + at + 1, name, text: headTail(section.join('\n').trim(), MAX_DOC_SECTION_CHARS).text });
+        if (found.length >= MAX_DOC_SECTIONS) return found;
+      }
+    }
   }
   return found;
 }
@@ -386,7 +429,7 @@ function projectFiles(disk: Disk, keep: (path: string) => boolean): SourceFile[]
       listed += 1;
       const path = dir === '' ? name : `${dir}/${name}`;
       if (name.startsWith('.') || SKIP_DIRS.has(name) || ignored.some(pattern => pattern.test(path))) continue;
-      if (isCodeFile(name)) {
+      if (isCodeFile(name) || DOC_FILE.test(name)) {
         if (!keep(path) || GENERATED_NAME.test(name)) continue;
         const full = join(disk.root, path);
         const text = disk.read(full);
@@ -395,7 +438,7 @@ function projectFiles(disk: Disk, keep: (path: string) => boolean): SourceFile[]
         if (found.length >= MAX_SOURCE_FILES) break;
         continue;
       }
-      // No stat on Disk. A name that is not code is a folder. list() on a file is empty.
+      // No stat on Disk. A name that is not code or markdown is a folder. list() on a file is empty.
       dirs.push(path);
     }
   }

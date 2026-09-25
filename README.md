@@ -6,7 +6,7 @@
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/fast-facts/jevy-vet/master.cron.code-analyze.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=CodeQL)](https://github.com/fast-facts/jevy-vet/actions/workflows/master.cron.code-analyze.yml)
 [![license](https://img.shields.io/github/license/fast-facts/jevy-vet?style=for-the-badge)](./LICENSE)
 
-An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have or hide an error, or when its last message claims more than it did.
+An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have, hide an error, or leave a comment or doc wrong, or when its last message claims more than it did.
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
@@ -157,11 +157,17 @@ When an agent changes a source file and adds a `catch`, an error default such as
 
 If Jev is sure, a note tells the agent to let the error fail loudly or handle it for real. It never blocks. Tests, fixtures, mocks, test helpers, and generated code are skipped. If you asked to ignore the error, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
 
+## Comments and docs that go stale
+
+When an agent changes code in a source file, the plugin sends Jev the comments on the changed function, and the sections of your markdown docs that name it. Jev decides if one of them is now wrong about the code. A comment the agent writes is checked too: does the code do what it says.
+
+If Jev is sure, a note tells the agent to update the comment or doc, or to ask you if the code is what is wrong. It never blocks. `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, and changelogs are left out. Tests, test helpers, and generated code are skipped. If you asked to change only the code, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
+
 ## If Jev cannot decide
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, and hidden-error checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
+For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, hidden-error, and stale-comment checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 

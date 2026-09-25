@@ -522,6 +522,12 @@ const IMPORT_LINE = [
   /^\s*(?:[\w.]+\s+)?"[\w./-]+"\s*$/,
 ];
 const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#)/;
+
+// A Rust attribute or a shebang starts with # but is code.
+export function isCommentLine(line: string): boolean {
+  return COMMENT_LINE.test(line) && !/^\s*#[[!]/.test(line);
+}
+
 // Loop bounds and indexes more often than test data.
 const COMMON_NUMBERS = new Set(['0', '1', '2', '-1', '10', '100']);
 

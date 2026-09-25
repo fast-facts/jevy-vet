@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { contextFor, type Disk, headTail, instructionFilesFor, type InstructionPlaces, isGenerated, MAX_CODE_CHARS, MAX_CODE_FILE_CHARS, relatedTests, sentencesOf, sourceFiles } from './context.ts';
+import { contextFor, type Disk, docSections, headTail, instructionFilesFor, type InstructionPlaces, isGenerated, MAX_CODE_CHARS, MAX_CODE_FILE_CHARS, relatedTests, sentencesOf, sourceFiles } from './context.ts';
 import { type TestFile, testFilesFrom } from './subjects.ts';
 
 function disk(files: Record<string, string>, root = '/repo'): Disk & { reads: string[] } {
@@ -341,6 +341,38 @@ describe('relatedTests', () => {
     const found = relatedTests(tree(files), 'src/a.ts').map(file => file.path);
     expect(found).toHaveLength(10);
     expect(found.every(path => path.startsWith('/repo/tests/'))).toBe(true);
+  });
+});
+
+describe('docSections', () => {
+  test('returns the markdown section that names a function as a whole word, and skips instruction files and changelogs', () => {
+    const files: Record<string, string> = {
+      '/repo/README.md': '# App\n\nIntro.\n\n## Retry\n\nCall `retry` to run a call again.\n\n## Other\n\nretryCount is unrelated.\n',
+      '/repo/docs/guide.mdx': 'Use retry() for flaky calls.\n',
+      '/repo/AGENTS.md': 'retry must stay small.\n',
+      '/repo/docs/CHANGELOG.md': 'retry was added.\n',
+      '/repo/node_modules/x/README.md': 'retry\n',
+    };
+    expect(docSections(tree(files), ['retry'])).toEqual([
+      { path: '/repo/README.md', line: 7, name: 'retry', text: '## Retry\n\nCall `retry` to run a call again.' },
+      { path: '/repo/docs/guide.mdx', line: 1, name: 'retry', text: 'Use retry() for flaky calls.' },
+    ]);
+  });
+
+  test('stops at five sections', () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 8; i += 1) files[`/repo/docs/d${i}.md`] = `# D${i}\n\nretry here.\n`;
+    expect(docSections(tree(files), ['retry'])).toHaveLength(5);
+  });
+
+  test('leaves markdown out of source files and related tests', () => {
+    const files: Record<string, string> = {
+      '/repo/src/a.ts': 'export function a() {}',
+      '/repo/src/a.md': 'export function a() {}',
+      '/repo/tests/README.md': 'import { a } from \'../src/a\';',
+    };
+    expect(sourceFiles(tree(files), new Set()).map(file => file.path)).toEqual(['/repo/src/a.ts']);
+    expect(relatedTests(tree(files), 'src/a.ts')).toEqual([]);
   });
 });
 
