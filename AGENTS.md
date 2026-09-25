@@ -31,6 +31,7 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks, the check
 - `src/stale.ts` — the stale-comment check.
 - `src/stale.test.ts` — stale-comment check tests.
 - `src/fakes.test.ts` — the fake fetch and disk the check tests share.
+- `scripts/smoke.ts` — smoke test. `bun run smoke` runs a real `opencode` against fake model and TypeSafe servers. It is not part of `bun test`. `.github/workflows/master.pr.smoke.yml` installs OpenCode 1.x and runs it. It skips if `opencode` is not on PATH.
 
 ## Rules
 
