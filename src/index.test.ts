@@ -517,6 +517,33 @@ describe('plugin', () => {
       expect(reuse?.state.existing?.map(item => item.path)).toEqual(['src/date.ts']);
     });
   });
+  describe('hidden-error check', () => {
+    test('runs while the tool does, sees the last failure, and adds the note after the tool ran', async () => {
+      const project = withProject({ 'src/config.ts': 'export function load(path: string) {\n  return JSON.parse(readFileSync(path, \'utf8\'));\n}\n' });
+      const bodies: { state: { last_failure?: { command: string }; changes?: { path: string }[] }; questions: Record<string, unknown> }[] = [];
+      const fetchImpl: FakeFetch = (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as (typeof bodies)[number];
+        bodies.push(body);
+        const answers = 'x0_hides_error' in body.questions ? { x0_hides_error: { type: 'noul', noul: 0.9 } } : {};
+        return Promise.resolve(jsonResponse({ answers }));
+      };
+      try {
+        await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+          await hooks['tool.execute.after']({ tool: 'bash', sessionID: 's', callID: 'b', args: { command: 'bun test' } }, { title: '', output: 'SyntaxError', metadata: { exit: 1 } });
+          const args = { filePath: join(project, 'src/config.ts'), oldString: '  return JSON.parse(readFileSync(path, \'utf8\'));', newString: '  try {\n    return JSON.parse(readFileSync(path, \'utf8\'));\n  } catch {\n    return {};\n  }' };
+          await expect(before(hooks, 'edit', args)).resolves.toBeUndefined();
+          const output = { title: '', output: 'Edit applied', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'edit', sessionID: 's', callID: 'c', args }, output);
+          expect(output.output).toStartWith('Edit applied\n\nJevy note: this change was made, but it may hide an error instead of handling it.\n- src/config.ts, function "load"');
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      const hidden = bodies.find(body => 'x0_hides_error' in body.questions);
+      expect(hidden?.state.last_failure?.command).toBe('bun test');
+      expect(hidden?.state.changes?.map(change => change.path)).toEqual(['src/config.ts']);
+    });
+  });
   describe('special-case check', () => {
     test('finds the related test on disk and blocks the edit before it runs', async () => {
       const project = withProject({

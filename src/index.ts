@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { type Block, checkClaims, checkInstructions, checkReuse, type Failure, review, shownPath, type Step } from './review.ts';
+import { type Block, checkClaims, checkHiddenErrors, checkInstructions, checkReuse, type Failure, review, shownPath, type Step } from './review.ts';
 import { loadSettings } from './settings.ts';
 import { changesFrom, commandFrom } from './subjects.ts';
 
@@ -57,8 +57,8 @@ const MAX_STEP_OUTPUT_CHARS = 1000;
 // Enough to find the last user message behind a long run of tool steps.
 const READ_MESSAGES = 50;
 
-// Blocks useless test writes and changes that weaken a check, notes unsure ones, edits that may break the user's instructions, and new code that repeats existing code,
-// and checks the agent's final message against what it did when the session goes idle, by calling TypeSafe directly.
+// Blocks useless test writes and changes that weaken a check, notes unsure ones, edits that may break the user's instructions, new code that repeats existing code,
+// and source edits that may hide an error. It also checks the agent's final message against what it did when the session goes idle, by calling TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
@@ -228,7 +228,8 @@ export default async function jevyVet(input: Input) {
         instructionFiles: paths => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk),
       }).catch(() => undefined);
       const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
-      pending.set(hook.callID, Promise.all([instruction, reuse]).then(found => {
+      const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [], lastFailure: failures.get(top) }).catch(() => undefined);
+      pending.set(hook.callID, Promise.all([instruction, reuse, hidden]).then(found => {
         const parts = [...notes];
         for (const note of found) if (note) parts.push(note);
         return parts.join('\n\n') || undefined;

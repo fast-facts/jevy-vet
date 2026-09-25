@@ -349,6 +349,10 @@ const MAX_LISTED_ENTRIES = 20_000;
 const MAX_SOURCE_FILE_CHARS = 200_000;
 const MAX_RELATED_TESTS = 10;
 
+export function isGenerated(path: string, text: string): boolean {
+  return GENERATED_NAME.test(path) || GENERATED_MARK.test(text.slice(0, 500));
+}
+
 export interface SourceFile {
   path: string;
   text: string;

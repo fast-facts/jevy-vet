@@ -6,7 +6,7 @@
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/fast-facts/jevy-vet/master.cron.code-analyze.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=CodeQL)](https://github.com/fast-facts/jevy-vet/actions/workflows/master.cron.code-analyze.yml)
 [![license](https://img.shields.io/github/license/fast-facts/jevy-vet?style=for-the-badge)](./LICENSE)
 
-An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have, or when its last message claims more than it did.
+An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have or hide an error, or when its last message claims more than it did.
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
@@ -151,11 +151,17 @@ When an agent adds a new function to a source file, the plugin looks for the clo
 
 If Jev is sure, a note tells the agent which function to reuse and where it is. It never blocks. A move, or a rename that keeps half the old body, is not flagged. If you asked for a separate copy, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
 
+## Errors that are hidden
+
+When an agent changes a source file and adds a `catch`, an error default such as `??` or `|| []`, or an ignored error, or removes a `throw` or an error return, the plugin asks Jev whether the change hides a failure instead of handling it. Jev also sees the last command that failed. Errors that are rethrown, wrapped, really recovered from, or part of code a comment calls best effort are fine.
+
+If Jev is sure, a note tells the agent to let the error fail loudly or handle it for real. It never blocks. Tests, fixtures, mocks, test helpers, and generated code are skipped. If you asked to ignore the error, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
+
 ## If Jev cannot decide
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction and reuse checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
+For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, and hidden-error checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 
