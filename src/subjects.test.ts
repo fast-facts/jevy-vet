@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { editsFrom, stripComments, testFilesFrom, titleOf } from './subjects.ts';
+import { changesFrom, editsFrom, stripComments, testFilesFrom, titleOf } from './subjects.ts';
 
 describe('testFilesFrom', () => {
   test('splits a write into setup and one case per test', () => {
@@ -144,5 +144,39 @@ describe('stripComments', () => {
 
   test('drops Python hash comments but keeps a hash inside a string', () => {
     expect(stripComments('# changed to match output\nassert tag == "#1"  # ok', 'test_a.py')).toBe('assert tag == "#1"');
+  });
+});
+
+describe('changesFrom', () => {
+  const disk: Record<string, string> = { 'src/api.ts': 'export function get() {}', 'old.md': 'old notes' };
+  const read = (path: string) => disk[path];
+
+  test('covers any path for edit and write, with old text as contrast', () => {
+    expect(changesFrom('edit', { filePath: 'src/api.ts', oldString: 'get()', newString: 'fetch()' }, read)).toEqual([{ path: 'src/api.ts', old: 'get()', new: 'fetch()' }]);
+    expect(changesFrom('write', { filePath: 'src/api.ts', content: 'export function fetch() {}' }, read)).toEqual([{ path: 'src/api.ts', old: 'export function get() {}', new: 'export function fetch() {}' }]);
+    expect(changesFrom('write', { filePath: 'README.md', content: '# New' }, read)).toEqual([{ path: 'README.md', new: '# New' }]);
+    expect(changesFrom('read', { filePath: 'src/api.ts' }, read)).toEqual([]);
+    expect(changesFrom('edit', { filePath: '', newString: 'x' }, read)).toEqual([]);
+  });
+
+  test('reads each file of a patch, and checks a move where the file ends up', () => {
+    const patchText = [
+      '*** Begin Patch',
+      '*** Add File: docs/new.md',
+      '+hello',
+      '*** Update File: src/api.ts',
+      '*** Move to: src/client.ts',
+      '@@ export',
+      ' export function get() {',
+      '-  return 1',
+      '+  return 2',
+      '*** Delete File: old.md',
+      '*** End Patch',
+    ].join('\n');
+    expect(changesFrom('apply_patch', { patchText }, read)).toEqual([
+      { path: 'docs/new.md', new: 'hello' },
+      { path: 'src/client.ts', old: 'export function get() {\n  return 1', new: 'export function get() {\n  return 2' },
+      { path: 'old.md', old: 'old notes', new: '' },
+    ]);
   });
 });

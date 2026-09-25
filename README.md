@@ -1,10 +1,10 @@
 # jevy-vet
 
-An OpenCode plugin that stops a weak test before the file is written.
+An OpenCode plugin that stops a weak test before the file is written, and tells the agent when an edit may break your instructions.
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
-Today it only checks tests.
+For every file an agent changes, it also asks Jev if the change breaks one of your instructions. That only adds a note for the agent. It never blocks.
 
 ## Install
 
@@ -49,7 +49,7 @@ Quit OpenCode and start it again. A session that is already open keeps the old c
 
 ## Which files
 
-It watches `write`, `edit`, and `apply_patch`. It only looks at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
+It watches `write`, `edit`, and `apply_patch`. The test checks only look at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
 
 A file with more than one test is judged one test at a time. One bad test blocks the write.
 
@@ -94,15 +94,32 @@ Your own words allow the edit. The plugin keeps your last three messages for tha
 
 Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
 
+## Your instructions
+
+The plugin reads the same instruction files OpenCode gives the agent:
+
+- The global `AGENTS.md` (`$XDG_CONFIG_HOME/opencode`, or `~/.config/opencode`), or `~/.claude/CLAUDE.md` if that one is missing.
+- The project `AGENTS.md`. If there is none, `CLAUDE.md`, then `CONTEXT.md`.
+- The files in the `instructions` list of your OpenCode config. Web links are skipped.
+- The `AGENTS.md`, `CLAUDE.md`, or `CONTEXT.md` in each folder above the changed file, inside the project.
+
+It also uses your last three messages in that session. A subagent's edit is checked against your messages to the agent that started it. The subagent's prompt does not count. A later message from you can take a rule back.
+
+`.cursor/rules` and `.github/copilot-instructions.md` are read only if you add them to `instructions`, the same as OpenCode.
+
+Rules that are only about formatting are left out. With no key, or when TypeSafe fails, there is no note. Changes to `node_modules` and to `jevy-vet.jsonc` are not checked.
+
 ## If Jev cannot decide
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-The write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`.
+A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes are not.
 
 ## What this does not do
 
 It does not run the test. It does not prove the test would catch a real bug. You still need to run the tests for that.
+
+It can be wrong about your instructions, either way. It does not undo the edit.
 
 ## Tests
 

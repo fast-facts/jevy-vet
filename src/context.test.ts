@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { contextFor, type Disk, headTail, MAX_CODE_CHARS, MAX_CODE_FILE_CHARS } from './context.ts';
+import { contextFor, type Disk, headTail, instructionFilesFor, type InstructionPlaces, MAX_CODE_CHARS, MAX_CODE_FILE_CHARS, sentencesOf } from './context.ts';
 import { type TestFile, testFilesFrom } from './subjects.ts';
 
 function disk(files: Record<string, string>, root = '/repo'): Disk & { reads: string[] } {
@@ -156,5 +156,102 @@ describe('headTail', () => {
     expect(cut.text).toStartWith('a');
     expect(cut.text).toEndWith('b');
     expect(cut.text).toContain('characters cut');
+  });
+});
+
+describe('instructionFilesFor', () => {
+  const places = (extra: Partial<InstructionPlaces> = {}): InstructionPlaces => ({
+    worktree: '/repo',
+    home: '/home/u',
+    env: {},
+    configured: [],
+    glob: () => [],
+    ...extra,
+  });
+  const found = (changed: string[], files: Record<string, string>, extra: Partial<InstructionPlaces> = {}, root = '/repo') =>
+    instructionFilesFor(changed, places(extra), disk(files, root)).map(file => file.path);
+
+  test('takes the global AGENTS.md before ~/.claude/CLAUDE.md, like OpenCode', () => {
+    const both = { '/home/u/.config/opencode/AGENTS.md': 'global', '/home/u/.claude/CLAUDE.md': 'claude' };
+    expect(found([], both)).toEqual(['/home/u/.config/opencode/AGENTS.md']);
+    expect(found([], { '/home/u/.claude/CLAUDE.md': 'claude' })).toEqual(['/home/u/.claude/CLAUDE.md']);
+    expect(found([], { '/x/opencode/AGENTS.md': 'xdg' }, { env: { XDG_CONFIG_HOME: '/x' } })).toEqual(['/x/opencode/AGENTS.md']);
+    expect(found([], { '/home/u/.claude/CLAUDE.md': 'claude' }, { env: { OPENCODE_DISABLE_CLAUDE_CODE: '1' } })).toEqual([]);
+    expect(found([], { '/home/u/.claude/CLAUDE.md': 'claude' }, { env: { OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: 'true' } })).toEqual([]);
+  });
+
+  test('takes every copy of the first project file name found up to the worktree', () => {
+    const files = {
+      '/mono/AGENTS.md': 'top',
+      '/mono/app/AGENTS.md': 'app',
+      '/mono/app/CLAUDE.md': 'ignored, AGENTS.md was found first',
+      '/AGENTS.md': 'above the worktree',
+    };
+    expect(found([], files, { worktree: '/mono' }, '/mono/app')).toEqual(['/mono/AGENTS.md', '/mono/app/AGENTS.md']);
+    expect(found([], { '/repo/CLAUDE.md': 'claude' })).toEqual(['/repo/CLAUDE.md']);
+    expect(found([], { '/repo/CLAUDE.md': 'claude', '/repo/CONTEXT.md': 'context' }, { env: { OPENCODE_DISABLE_CLAUDE_CODE: '1' } })).toEqual(['/repo/CONTEXT.md']);
+    expect(found([], { '/repo/AGENTS.md': 'a' }, { env: { OPENCODE_DISABLE_PROJECT_CONFIG: 'true' } })).toEqual([]);
+  });
+
+  test('adds configured paths and globs but no URLs', () => {
+    const globs: string[] = [];
+    const glob = (pattern: string, cwd: string) => {
+      globs.push(`${cwd}|${pattern}`);
+      return pattern === 'docs/*.md' ? ['/repo/docs/rules.md'] : pattern === 'team.md' ? ['/home/u/team.md'] : [];
+    };
+    const files = { '/repo/docs/rules.md': 'rules', '/home/u/team.md': 'team' };
+    expect(found([], files, { configured: ['docs/*.md', '~/team.md', 'https://example.com/rules.md'], glob })).toEqual(['/repo/docs/rules.md', '/home/u/team.md']);
+    expect(globs).toEqual(['/repo|docs/*.md', '/home/u|team.md']);
+  });
+
+  test('adds the nearest instruction file in each folder above a changed file, inside the project only', () => {
+    const files = {
+      '/repo/AGENTS.md': 'root',
+      '/repo/src/AGENTS.md': 'src',
+      '/repo/src/api/CLAUDE.md': 'api',
+      '/repo/src/api/CONTEXT.md': 'not used, CLAUDE.md comes first',
+      '/repo/node_modules/pkg/AGENTS.md': 'package',
+    };
+    expect(found(['src/api/routes.ts', '/repo/node_modules/pkg/index.js'], files)).toEqual(['/repo/AGENTS.md', '/repo/src/AGENTS.md', '/repo/src/api/CLAUDE.md']);
+  });
+
+  test('cuts each file and stops at the total budget', () => {
+    const big = 'x'.repeat(20_000);
+    const files = { '/home/u/.config/opencode/AGENTS.md': big, '/repo/AGENTS.md': big, '/repo/a/AGENTS.md': big, '/repo/a/b/AGENTS.md': big, '/repo/a/b/c/AGENTS.md': big };
+    const result = instructionFilesFor(['a/b/c/x.ts'], places(), disk(files));
+    expect(result.every(file => file.text.length <= 8000)).toBe(true);
+    expect(result.reduce((sum, file) => sum + file.text.length, 0)).toBeLessThanOrEqual(24_000);
+    expect(result.map(file => file.path)).toEqual(['/home/u/.config/opencode/AGENTS.md', '/repo/AGENTS.md', '/repo/a/AGENTS.md']);
+  });
+});
+
+describe('sentencesOf', () => {
+  test('splits prose and list items into sentences and skips headings, tables, and code', () => {
+    const text = [
+      '# Rules',
+      '',
+      '- Do not edit `src/generated.ts`. It is rebuilt on every run.',
+      '1. Keep the public API stable!',
+      '* [ ] Ask before adding a dependency',
+      '| a | b |',
+      '```',
+      'rm -rf / is not a sentence here.',
+      '```',
+      '---',
+      'ok.',
+      'Never change the database schema without a migration. e.g. use the tool.',
+    ].join('\n');
+    expect(sentencesOf(text)).toEqual([
+      'Do not edit `src/generated.ts`.',
+      'It is rebuilt on every run.',
+      'Keep the public API stable!',
+      'Ask before adding a dependency',
+      // Only a capital starts a new sentence, so "e.g. use" stays whole.
+      'Never change the database schema without a migration. e.g. use the tool.',
+    ]);
+  });
+
+  test('cuts a very long sentence', () => {
+    expect(sentencesOf('a'.repeat(1000))[0]).toHaveLength(400);
   });
 });

@@ -226,3 +226,116 @@ export function listDir(dir: string): string[] {
     return [];
   }
 }
+
+// Instruction files, found the way OpenCode 1 finds them (packages/opencode/src/session/instruction.ts).
+// Read as the rules an edit is checked against. Never judged themselves.
+export interface InstructionFile {
+  path: string;
+  text: string;
+}
+
+export interface InstructionPlaces {
+  // OpenCode's worktree. The project search stops there.
+  worktree: string;
+  home: string;
+  env: Record<string, string | undefined>;
+  // The `instructions` list from the user's OpenCode config.
+  configured: string[];
+  glob: (pattern: string, cwd: string) => string[];
+}
+
+const INSTRUCTION_NAMES = ['AGENTS.md', 'CLAUDE.md', 'CONTEXT.md'];
+const MAX_INSTRUCTION_FILE_CHARS = 8000;
+const MAX_INSTRUCTION_CHARS = 24_000;
+const MAX_GLOB_MATCHES = 20;
+
+// Order: global, project, configured, then the files nearest each changed file. Later is more specific.
+export function instructionFilesFor(changedPaths: string[], places: InstructionPlaces, disk: Disk): InstructionFile[] {
+  const flag = (name: string) => ['true', '1'].includes((places.env[name] ?? '').toLowerCase());
+  const claude = !flag('OPENCODE_DISABLE_CLAUDE_CODE') && !flag('OPENCODE_DISABLE_CLAUDE_CODE_PROMPT');
+  const project = !flag('OPENCODE_DISABLE_PROJECT_CONFIG');
+  const root = resolve(disk.root);
+  const worktree = resolve(places.worktree);
+  const paths: string[] = [];
+
+  const xdg = places.env.XDG_CONFIG_HOME?.trim();
+  const globalPaths = [join(xdg ? xdg : join(places.home, '.config'), 'opencode', 'AGENTS.md')];
+  if (claude) globalPaths.push(join(places.home, '.claude', 'CLAUDE.md'));
+  const firstGlobal = globalPaths.find(path => disk.read(path) !== undefined);
+  if (firstGlobal) paths.push(firstGlobal);
+
+  const names = INSTRUCTION_NAMES.filter(name => claude || name !== 'CLAUDE.md');
+  if (project) {
+    // The first name found anywhere between the project folder and the worktree wins, and every copy of it counts.
+    for (const name of names) {
+      const found: string[] = [];
+      for (let dir = root; ; dir = dirname(dir)) {
+        const path = join(dir, name);
+        if (disk.read(path) !== undefined) found.push(path);
+        if (dir === worktree || dir === dirname(dir) || !inside(worktree, dir)) break;
+      }
+      if (found.length === 0) continue;
+      paths.push(...found.reverse());
+      break;
+    }
+  }
+
+  for (const entry of places.configured) {
+    if (/^https?:\/\//.test(entry)) continue; // OpenCode fetches these. This plugin reads no URLs.
+    const expanded = entry.startsWith('~/') ? join(places.home, entry.slice(2)) : entry;
+    const matches = isAbsolute(expanded) ? places.glob(basename(expanded), dirname(expanded)) : places.glob(expanded, root);
+    paths.push(...matches.slice(0, MAX_GLOB_MATCHES));
+  }
+
+  if (project) {
+    for (const changed of changedPaths) {
+      const nearest: string[] = [];
+      const target = isAbsolute(changed) ? resolve(changed) : resolve(root, changed);
+      for (let dir = dirname(target); dir !== root && inside(root, dir); dir = dirname(dir)) {
+        const name = names.find(n => disk.read(join(dir, n)) !== undefined);
+        if (name) nearest.push(join(dir, name));
+      }
+      paths.push(...nearest.reverse());
+    }
+  }
+
+  const files: InstructionFile[] = [];
+  let left = MAX_INSTRUCTION_CHARS;
+  for (const path of [...new Set(paths)]) {
+    const text = disk.read(path);
+    if (text === undefined || text.trim() === '' || left <= 0) continue;
+    const cut = headTail(text, Math.min(MAX_INSTRUCTION_FILE_CHARS, left)).text;
+    left -= cut.length;
+    files.push({ path, text: cut });
+  }
+  return files;
+}
+
+export function globFiles(pattern: string, cwd: string): string[] {
+  try {
+    return [...new Bun.Glob(pattern).scanSync({ cwd, absolute: true, onlyFiles: true })];
+  } catch {
+    return [];
+  }
+}
+
+// Sentences and list items, one rule each. Headings, tables, and code blocks are skipped.
+// ponytail: a period before a capital, as in "Mr. Smith", splits a sentence early.
+export function sentencesOf(text: string): string[] {
+  const out: string[] = [];
+  let fenced = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('```')) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced || line === '' || line.startsWith('#') || line.startsWith('|') || /^[-*_=]{3,}$/.test(line)) continue;
+    const body = line.replace(/^(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, '');
+    for (const part of body.split(/(?<=[.!?])\s+(?=[A-Z`"'(*])/)) {
+      const sentence = part.trim();
+      if (sentence.length >= 8) out.push(sentence.slice(0, 400));
+    }
+  }
+  return out;
+}

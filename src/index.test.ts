@@ -40,8 +40,11 @@ async function usingPlugin(
 ) {
   const root = mkdtempSync(join(tmpdir(), 'jevy-vet-'));
   const savedXdg = process.env.XDG_CONFIG_HOME;
+  const savedHome = process.env.HOME;
   const savedFetch = globalThis.fetch;
   process.env.XDG_CONFIG_HOME = root;
+  // So a real ~/.claude/CLAUDE.md on this machine is not read.
+  process.env.HOME = root;
   if (config !== undefined) {
     const dir = join(root, 'opencode');
     mkdirSync(dir);
@@ -53,6 +56,8 @@ async function usingPlugin(
   } finally {
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdg;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
     globalThis.fetch = savedFetch;
     rmSync(root, { recursive: true, force: true });
   }
@@ -248,5 +253,107 @@ describe('plugin', () => {
     await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', down, async hooks => {
       await expect(before(hooks, 'write', args)).resolves.toBeUndefined();
     }, () => Promise.reject(new Error('log down')));
+  });
+
+  describe('instruction notes', () => {
+    interface Sent {
+      state: { sentences?: { text: string }[]; instructions?: { from: string; text: string }[]; changes?: { path: string; old?: string; new: string }[]; user_messages?: string[] };
+      questions: Record<string, unknown>;
+    }
+    // Every "Do not" sentence is a rule, and every change breaks every rule.
+    function strict(sent: Sent[]): FakeFetch {
+      return (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Sent;
+        sent.push(body);
+        const answers: Record<string, unknown> = {};
+        for (const id of Object.keys(body.questions)) {
+          const n = Number(/^s(\d+)_/.exec(id)?.[1]);
+          if (id.endsWith('_limits')) answers[id] = { type: 'noul', noul: /Do not/.test(body.state.sentences?.[n]?.text ?? '') ? 0.9 : 0.1 };
+          else if (id.endsWith('_style')) answers[id] = { type: 'noul', noul: 0.1 };
+          else if (id.endsWith('_breaks')) answers[id] = { type: 'noul', noul: 0.9 };
+          else if (id.endsWith('_lifted')) answers[id] = { type: 'noul', noul: 0.1 };
+        }
+        return Promise.resolve(jsonResponse({ answers }));
+      };
+    }
+
+    function withProject(files: Record<string, string>) {
+      const project = mkdtempSync(join(tmpdir(), 'jevy-vet-project-'));
+      for (const [path, text] of Object.entries(files)) {
+        mkdirSync(join(project, path, '..'), { recursive: true });
+        writeFileSync(join(project, path), text);
+      }
+      return project;
+    }
+
+    test('appends a note to the tool output for the same call, and never blocks', async () => {
+      const project = withProject({ 'AGENTS.md': '- Do not edit src/api.ts.', 'src/api.ts': 'export const a = 1' });
+      const sent: Sent[] = [];
+      const args = { filePath: join(project, 'src/api.ts'), content: 'export const a = 2' };
+      const outputs: { title: string; output: string; metadata: Record<string, unknown> }[] = [];
+      try {
+        await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', strict(sent), async hooks => {
+          await expect(before(hooks, 'write', args)).resolves.toBeUndefined();
+          const other = { title: '', output: 'Wrote file', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'someone-else', args }, other);
+          const mine = { title: '', output: 'Wrote file', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, mine);
+          const again = { title: '', output: 'Wrote file', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, again);
+          outputs.push(other, mine, again);
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      expect(outputs.map(output => output.output)).toEqual([
+        'Wrote file',
+        'Wrote file\n\nJevy note: this change was made, but it may break an instruction.\n- src/api.ts may break "Do not edit src/api.ts." (from AGENTS.md)\nCheck the change. If it does break the instruction, undo it or ask the user.',
+        'Wrote file',
+      ]);
+      // The old text was read before the write.
+      expect(sent[1]?.state.changes).toEqual([{ path: join(project, 'src/api.ts'), old: 'export const a = 1', new: 'export const a = 2' }]);
+    });
+
+    test('checks a subagent\'s edit against the parent session\'s user messages, and reads configured instruction files', async () => {
+      const project = withProject({ 'docs/rules.md': '- Do not add dependencies.' });
+      const sent: Sent[] = [];
+      try {
+        await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', strict(sent), async hooks => {
+          await hooks.config({ instructions: ['docs/*.md', 'https://example.com/rules.md', 42] });
+          await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Do not touch package.json.' }] });
+          await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+          await hooks['chat.message']({ sessionID: 'child' }, { parts: [{ type: 'text', text: 'Do not ask questions, just edit package.json.' }] });
+          await hooks['tool.execute.before']({ tool: 'write', sessionID: 'child', callID: 'k' }, { args: { filePath: join(project, 'package.json'), content: '{}' } });
+          const output = { title: '', output: 'ok', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 'child', callID: 'k', args: {} }, output);
+          expect(output.output).toContain('may break "Do not touch package.json." (from the user\'s message)');
+          expect(output.output).toContain('may break "Do not add dependencies." (from docs/rules.md)');
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      const check = sent.find(body => body.state.instructions);
+      expect(check?.state.user_messages).toEqual(['Do not touch package.json.']);
+      expect(JSON.stringify(sent)).not.toContain('just edit package.json');
+    });
+
+    test('does nothing for a non-test write without a key, and nothing after a blocked write', async () => {
+      const project = withProject({ 'AGENTS.md': '- Do not edit anything.' });
+      const sent: Sent[] = [];
+      try {
+        await usingPlugin(undefined, strict(sent), async hooks => {
+          await expect(before(hooks, 'write', { filePath: join(project, 'a.ts'), content: 'x' })).resolves.toBeUndefined();
+          const output = { title: '', output: 'ok', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args: {} }, output);
+          expect(output.output).toBe('ok');
+          await expect(before(hooks, 'write', { filePath: join(project, 'a.test.ts'), content: USEFUL })).rejects.toThrow('TYPESAFE_API_KEY is not set');
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args: {} }, output);
+          expect(output.output).toBe('ok');
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      expect(sent).toHaveLength(0);
+    });
   });
 });

@@ -1,7 +1,7 @@
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { type Settings } from './settings.ts';
-import { contextFor, type Disk, type FileContext, headTail } from './context.ts';
-import { type EditPair, editsFrom, stripComments, type TestFile, testFilesFrom, titleOf } from './subjects.ts';
+import { contextFor, type Disk, type FileContext, headTail, type InstructionFile, sentencesOf } from './context.ts';
+import { type Change, changesFrom, type EditPair, editsFrom, stripComments, type TestFile, testFilesFrom, titleOf } from './subjects.ts';
 
 // Jev allows 32k tokens for state plus the longest question, and 64k for state plus all questions.
 // A token is at least 3 characters of code, so these stay well inside both.
@@ -158,12 +158,7 @@ interface Edit extends EditPair {
 
 export async function review(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
   const files = testFilesFrom(tool, args);
-  const disk = deps.disk;
-  const read = (path: string): string | undefined => {
-    if (!disk) return;
-    return disk.read(isAbsolute(path) ? resolve(path) : resolve(disk.root, path));
-  };
-  const edits: Edit[] = editsFrom(tool, args, read).map((pair, n) => ({ ...pair, id: `e${n}` }));
+  const edits: Edit[] = editsFrom(tool, args, reader(deps.disk)).map((pair, n) => ({ ...pair, id: `e${n}` }));
   if (files.length === 0 && edits.length === 0) return;
 
   const names = [...new Set([...files, ...edits].map(item => item.path))].join(', ');
@@ -171,20 +166,11 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
   if (settings.error) return `${settings.error} Jevy blocked the test write for ${names}.`;
   if (settings.key.trim() === '') return `TYPESAFE_API_KEY is not set. Jevy blocked the test write for ${names}. Add it to ${settings.path}.`;
 
-  // Several requests can fail the same way. Log each message once.
-  const logged = new Set<string>();
-  const once: ReviewDeps = {
-    ...deps,
-    log: message => {
-      if (logged.has(message)) return;
-      logged.add(message);
-      deps.log?.(message);
-    },
-  };
+  const once = logOnce(deps);
   const prepared = prepare(files, deps.disk);
   const userMessages = deps.userMessages ?? [];
   const all = [...batches(prepared), ...editBatches(edits, userMessages)];
-  const results = await Promise.all(all.map(batch => callTypeSafe(once, settings, batch)));
+  const results = await Promise.all(all.map(batch => callTypeSafe(once, settings, batch, 'The test write was allowed.')));
   const answers: Record<string, unknown> = {};
   for (const result of results) if (result) Object.assign(answers, result);
   const messages = [blockMessage(prepared, answers), editBlockMessage(edits, answers, once)].filter(message => message !== undefined);
@@ -329,7 +315,32 @@ function fileEntry(item: Prepared): SentFile {
   };
 }
 
-async function callTypeSafe(deps: ReviewDeps, settings: Settings, batch: Batch | EditRequest): Promise<Record<string, unknown> | undefined> {
+// Several requests can fail the same way. Log each message once.
+function logOnce(deps: ReviewDeps): ReviewDeps {
+  const logged = new Set<string>();
+  return {
+    ...deps,
+    log: message => {
+      if (logged.has(message)) return;
+      logged.add(message);
+      deps.log?.(message);
+    },
+  };
+}
+
+function reader(disk: Disk | undefined): (path: string) => string | undefined {
+  return path => {
+    if (!disk) return;
+    return disk.read(isAbsolute(path) ? resolve(path) : resolve(disk.root, path));
+  };
+}
+
+async function callTypeSafe(
+  deps: ReviewDeps,
+  settings: Settings,
+  batch: Batch | EditRequest | SentenceRequest | RuleRequest,
+  allowed: string,
+): Promise<Record<string, unknown> | undefined> {
   const key = settings.key.trim();
   const base = (settings.baseUrl.trim() || 'https://api.typesafe.ai').replace(/\/+$/, '');
   const allow = (message: string): undefined => {
@@ -354,18 +365,18 @@ async function callTypeSafe(deps: ReviewDeps, settings: Settings, batch: Batch |
       }),
     });
   } catch {
-    return allow('TypeSafe request failed. The test write was allowed.');
+    return allow(`TypeSafe request failed. ${allowed}`);
   }
-  if (!response.ok) return allow(`TypeSafe returned ${response.status}. The test write was allowed.`);
+  if (!response.ok) return allow(`TypeSafe returned ${response.status}. ${allowed}`);
 
   let body: unknown;
   try {
     body = await response.json();
   } catch {
-    return allow('TypeSafe returned an unreadable response. The test write was allowed.');
+    return allow(`TypeSafe returned an unreadable response. ${allowed}`);
   }
   if (!isRecord(body) || !isRecord(body.answers)) {
-    return allow('TypeSafe returned no answers. The test write was allowed.');
+    return allow(`TypeSafe returned no answers. ${allowed}`);
   }
   return body.answers;
 }
@@ -374,7 +385,7 @@ function blockMessage(prepared: Prepared[], answers: Record<string, unknown>): s
   const blocked: string[] = [];
   for (const item of prepared) {
     for (const [n, test] of item.cases.entries()) {
-      const fails = CLAIMS.filter(claim => shouldBlock(answers[`${test.id}_${claim.id}`])).map(claim => claim.fail);
+      const fails = CLAIMS.filter(claim => noulIsSure(answers[`${test.id}_${claim.id}`])).map(claim => claim.fail);
       if (fails.length === 0) continue;
       const name = test.title ? `test "${test.title}"` : `test ${n + 1}`;
       blocked.push(`${item.file.path} (${name}): ${fails.join(' ')}`);
@@ -392,11 +403,11 @@ function editBlockMessage(edits: Edit[], answers: Record<string, unknown>, deps:
     if (isRecord(change) && typeof change.choice === 'string' && change.choice in BAD_CHANGES && choiceIsSure(change)) {
       fails.push(BAD_CHANGES[change.choice]);
     }
-    if (shouldBlock(answers[`${edit.id}_removes_test`])) fails.push('It removes or disables a test without an equivalent replacement.');
+    if (noulIsSure(answers[`${edit.id}_removes_test`])) fails.push('It removes or disables a test without an equivalent replacement.');
     if (fails.length === 0) continue;
     // Unsure counts as asked, the same way unsure allows everywhere else.
-    const asked = answers[`${edit.id}_user_asked`];
-    if (isRecord(asked) && typeof asked.noul === 'number' && asked.noul >= 0.5) {
+    const asked = noulScore(answers[`${edit.id}_user_asked`]);
+    if (asked !== undefined && asked >= 0.5) {
       deps.log?.(`${edit.path}: the user asked for this test change. The edit was allowed.`);
       continue;
     }
@@ -435,10 +446,222 @@ function choiceIsSure(value: Record<string, unknown>): boolean {
   return scoreIsSure(probabilities[value.choice], value.confidence);
 }
 
-function shouldBlock(value: unknown): boolean {
-  return isRecord(value) && scoreIsSure(value.noul, value.confidence);
+function noulScore(value: unknown): number | undefined {
+  return isRecord(value) && typeof value.noul === 'number' ? value.noul : undefined;
+}
+
+function noulIsSure(value: unknown): boolean {
+  return scoreIsSure(noulScore(value), isRecord(value) ? value.confidence : undefined);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// The instruction check. It warns and never blocks: a rule read from prose is a guess, and
+// the user may have changed their mind in a way this plugin cannot see.
+const MAX_INSTRUCTIONS = 20;
+const MAX_FILE_SENTENCES = 150;
+const MAX_SENTENCES_PER_REQUEST = 50;
+const MAX_CACHED_SENTENCES = 2000;
+const MAX_CHANGES = 10;
+const MAX_WARNINGS = 5;
+// Comments are stripped only where the syntax is known. Prose like "don't" is not a quote.
+const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|swift|cs|c|cc|cpp|h|hpp|scala|dart)$/;
+
+export interface InstructionDeps extends ReviewDeps {
+  // Instruction files that apply to the changed paths, global first and nearest last.
+  instructionFiles: (paths: string[]) => InstructionFile[];
+  // Answers by sentence, kept for the plugin's lifetime. true means a rule worth checking.
+  cache: Map<string, boolean>;
+}
+
+interface Sentence {
+  key: string;
+  text: string;
+  // An instruction file path, or `user_messages[n]`.
+  from: string;
+}
+
+interface SentenceRequest {
+  state: { purpose: string; user_messages?: string[]; sentences: { from: string; text: string }[] };
+  questions: Record<string, Question>;
+}
+
+interface RuleRequest {
+  state: {
+    purpose: string;
+    user_messages?: string[];
+    instructions: { from: string; text: string }[];
+    changes: Change[];
+  };
+  questions: Record<string, Question>;
+}
+
+// Returns a note for the tool output, or nothing. Reads the disk before its first await,
+// so a `write` is compared with the file as it was before the write.
+export async function checkInstructions(tool: string, args: unknown, deps: InstructionDeps): Promise<string | undefined> {
+  const root = deps.disk?.root ?? '';
+  // jevy-vet's own config and installed packages are never checked.
+  const ignored = (path: string) => /(?:^|[\\/])node_modules[\\/]/.test(path) || /(?:^|[\\/])jevy-vet\.jsonc?$/.test(path);
+  const changes = changesFrom(tool, args, reader(deps.disk)).filter(change => !ignored(change.path)).slice(0, MAX_CHANGES);
+  if (changes.length === 0) return;
+  const userMessages = deps.userMessages ?? [];
+  const files = deps.instructionFiles(changes.map(change => change.path));
+  if (files.length === 0 && userMessages.length === 0) return;
+  // A missing key blocks only a test write.
+  const settings = deps.load();
+  if (settings.error || settings.key.trim() === '') return;
+  const once = logOnce(deps);
+  const allowed = 'No instruction note was added.';
+
+  const show = (path: string) => (root && isAbsolute(path) ? relative(root, path) : path) || path;
+  const fromFiles: Sentence[] = [];
+  for (const file of files) {
+    for (const text of sentencesOf(file.text)) fromFiles.push({ key: `file\n${text}`, text, from: show(file.path) });
+  }
+  const fromUser: Sentence[] = [];
+  for (const [n, message] of userMessages.entries()) {
+    for (const text of sentencesOf(message)) fromUser.push({ key: `user\n${text}`, text, from: `user_messages[${n}]` });
+  }
+  // The same sentence is asked once. The first copy wins.
+  const sentences: Sentence[] = [];
+  const seen = new Set<string>();
+  for (const sentence of [...fromFiles.slice(-MAX_FILE_SENTENCES), ...fromUser]) {
+    if (seen.has(sentence.key)) continue;
+    seen.add(sentence.key);
+    sentences.push(sentence);
+  }
+
+  // Each sentence is asked once per plugin lifetime.
+  const unknown = sentences.filter(sentence => !deps.cache.has(sentence.key));
+  const chunks: Sentence[][] = [];
+  for (let start = 0; start < unknown.length; start += MAX_SENTENCES_PER_REQUEST) chunks.push(unknown.slice(start, start + MAX_SENTENCES_PER_REQUEST));
+  await Promise.all(chunks.map(async chunk => {
+    const request = sentenceRequest(chunk, userMessages);
+    const answers = await callTypeSafe(once, settings, request, allowed);
+    for (const [n, sentence] of chunk.entries()) {
+      const limits = noulScore(answers?.[`s${n}_limits`]);
+      const style = noulScore(answers?.[`s${n}_style`]);
+      // A missing answer is asked again next time, not remembered as "not a rule".
+      if (limits === undefined || style === undefined) continue;
+      deps.cache.set(sentence.key, limits >= 0.5 && style < 0.5);
+      if (deps.cache.size > MAX_CACHED_SENTENCES) {
+        const oldest = deps.cache.keys().next().value;
+        if (oldest !== undefined) deps.cache.delete(oldest);
+      }
+    }
+  }));
+
+  const rules = sentences.filter(sentence => deps.cache.get(sentence.key) === true).slice(-MAX_INSTRUCTIONS);
+  if (rules.length === 0) return;
+
+  // Leave room for one lift question per rule, so a batch stays within the question limit.
+  const perRequest = Math.max(1, Math.floor((MAX_QUESTIONS - rules.length) / rules.length));
+  const requests: RuleRequest[] = [];
+  for (let start = 0; start < changes.length; start += perRequest) {
+    requests.push(ruleRequest(changes.slice(start, start + perRequest), rules, userMessages));
+  }
+  const results = await Promise.all(requests.map(request => callTypeSafe(once, settings, request, allowed)));
+  const warnings: string[] = [];
+  for (const [r, request] of requests.entries()) {
+    const answers = results[r];
+    if (!answers) continue;
+    // A later user message that lifts the rule wins. Unsure counts as lifted.
+    const lifted = new Set<number>();
+    for (const k of rules.keys()) {
+      const answer = noulScore(answers[`i${k}_lifted`]);
+      if (answer !== undefined && answer >= 0.5) lifted.add(k);
+    }
+    for (const [j, change] of request.state.changes.entries()) {
+      for (const [k, rule] of rules.entries()) {
+        if (lifted.has(k) || !noulIsSure(answers[`c${j}_i${k}_breaks`])) continue;
+        const quoted = rule.text.length > 200 ? `${rule.text.slice(0, 197)}...` : rule.text;
+        const source = rule.from.startsWith('user_messages') ? 'the user\'s message' : rule.from;
+        warnings.push(`- ${show(change.path)} may break "${quoted}" (from ${source})`);
+      }
+    }
+  }
+  if (warnings.length === 0) return;
+  const shown = [...new Set(warnings)];
+  return [
+    'Jevy note: this change was made, but it may break an instruction.',
+    ...shown.slice(0, MAX_WARNINGS),
+    ...(shown.length > MAX_WARNINGS ? [`- and ${shown.length - MAX_WARNINGS} more`] : []),
+    'Check the change. If it does break the instruction, undo it or ask the user.',
+  ].join('\n');
+}
+
+function sentenceRequest(chunk: Sentence[], userMessages: string[]): SentenceRequest {
+  const questions: Record<string, Question> = {};
+  for (const n of chunk.keys()) {
+    const at = `\`sentences[${n}].text\``;
+    questions[`s${n}_limits`] = {
+      type: 'noul',
+      instructions: `Is the sentence in ${at} an instruction that limits what the agent may change or how?`,
+      criteria: {
+        true: 'It forbids, restricts, or requires something about which files, code, tests, APIs, dependencies, or commands the agent may change or use, or how it must change them.',
+        false: 'It describes, explains, suggests, asks a question, or thanks. Or it is a task to do rather than a limit on how to do it.',
+      },
+    };
+    questions[`s${n}_style`] = {
+      type: 'noul',
+      instructions: `Is the sentence in ${at} only about formatting or code style?`,
+      criteria: {
+        true: 'It is only about whitespace, line length, quotes, semicolons, naming case, import order, or other things a formatter or linter checks.',
+        false: 'It is about behavior, scope, files, tests, APIs, dependencies, commands, or process.',
+      },
+    };
+  }
+  const user = chunk.some(sentence => sentence.from.startsWith('user_messages'));
+  return {
+    state: {
+      purpose: 'Decide which sentences are rules a coding agent must follow when it edits files. `from` is the instruction file or the user message the sentence comes from. `user_messages` gives the full messages for context.',
+      ...(user ? { user_messages: userMessages } : {}),
+      sentences: chunk.map(sentence => ({ from: sentence.from, text: sentence.text })),
+    },
+    questions,
+  };
+}
+
+function ruleRequest(changes: Change[], rules: Sentence[], userMessages: string[]): RuleRequest {
+  const questions: Record<string, Question> = {};
+  const side = (text: string, path: string) => headTail(CODE_FILE.test(path) ? stripComments(text, path) : text, MAX_EDIT_SIDE_CHARS).text;
+  for (const j of changes.keys()) {
+    for (const k of rules.keys()) {
+      questions[`c${j}_i${k}_breaks`] = {
+        type: 'noul',
+        instructions: `Does the change in \`changes[${j}]\` violate the instruction in \`instructions[${k}].text\`?`,
+        criteria: {
+          true: 'The `new` text does something the instruction forbids, or leaves out something it requires, for this file.',
+          false: 'The `new` text follows the instruction, or the instruction does not apply to this file or this kind of change.',
+        },
+      };
+    }
+  }
+  if (userMessages.length > 0) {
+    for (const k of rules.keys()) {
+      questions[`i${k}_lifted`] = {
+        type: 'noul',
+        instructions: `Does a message in \`user_messages\` that comes after the instruction in \`instructions[${k}]\` take it back or allow an exception to it?`,
+        criteria: {
+          true: 'A later user message cancels, changes, or makes an exception to this instruction. Every user message comes after instruction files.',
+          false: 'No later user message changes this instruction, or it comes from the latest user message.',
+        },
+      };
+    }
+  }
+  return {
+    state: {
+      purpose: 'Decide whether each change in `changes` breaks an instruction in `instructions`. `new` is the text after the change. `old`, when present, is the text it replaced, for contrast only. `user_messages` are the user\'s messages, oldest first. The latest user message wins over earlier instructions. Comments were removed from code files.',
+      ...(userMessages.length > 0 ? { user_messages: userMessages } : {}),
+      instructions: rules.map(rule => ({ from: rule.from, text: rule.text })),
+      changes: changes.map(change => ({
+        path: change.path,
+        ...(change.old === undefined ? {} : { old: side(change.old, change.path) }),
+        new: side(change.new, change.path),
+      })),
+    },
+    questions,
+  };
 }

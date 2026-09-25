@@ -1,11 +1,13 @@
 import { homedir } from 'node:os';
-import { headTail, listDir, readSource } from './context.ts';
-import { review } from './review.ts';
+import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
+import { checkInstructions, review } from './review.ts';
 import { loadSettings } from './settings.ts';
 
 interface Input {
   // The project folder. OpenCode passes it. The code under test is only read from inside it.
   directory?: string;
+  // Where OpenCode stops looking for project instruction files.
+  worktree?: string;
   client: {
     app: {
       log(input: {
@@ -32,24 +34,46 @@ interface PluginEvent {
 const KEEP_MESSAGES = 3;
 const MAX_MESSAGE_CHARS = 4000;
 const KEEP_SESSIONS = 100;
+// Checks started before a tool runs and not yet collected after it. A failed tool never collects.
+const KEEP_PENDING = 50;
 
-// Blocks useless test writes by calling TypeSafe directly.
+// Blocks useless test writes, and notes edits that may break the user's instructions, by calling TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
   const root = input.directory ?? process.cwd();
+  const worktree = input.worktree ?? root;
   // The user's latest messages per session, so a test change the user asked for is allowed.
   const messages = new Map<string, string[]>();
   // A subagent's prompt is written by the parent agent, not the user. It never counts as the user asking.
-  const subagents = new Set<string>();
+  // The parent is kept so a subagent's edits are still checked against the user's instructions.
+  const parents = new Map<string, string>();
+  // The `instructions` list from the user's OpenCode config. OpenCode loads those files too.
+  let configured: string[] = [];
+  const sentences = new Map<string, boolean>();
+  const pending = new Map<string, Promise<string | undefined>>();
+  const disk = { root, read: readSource, list: listDir };
+  const log = (message: string) => {
+    try {
+      void input.client.app
+        .log({ body: { service: 'jevy-vet', level: 'warn', message } })
+        .catch(() => undefined);
+    } catch {
+      return;
+    }
+  };
   return {
+    config: (config: { instructions?: unknown }) => {
+      configured = Array.isArray(config.instructions) ? config.instructions.filter((item: unknown): item is string => typeof item === 'string') : [];
+      return Promise.resolve();
+    },
     event: ({ event }: { event: PluginEvent }) => {
       const info = event.properties?.info;
-      if (event.type === 'session.created' && info?.id && info.parentID) subagents.add(info.id);
+      if (event.type === 'session.created' && info?.id && info.parentID) parents.set(info.id, info.parentID);
       // Ids only, so keep more of these than message sessions.
-      if (subagents.size > KEEP_SESSIONS * 10) {
-        const oldest = subagents.values().next().value;
-        if (oldest !== undefined) subagents.delete(oldest);
+      if (parents.size > KEEP_SESSIONS * 10) {
+        const oldest = parents.keys().next().value;
+        if (oldest !== undefined) parents.delete(oldest);
       }
       return Promise.resolve();
     },
@@ -70,24 +94,47 @@ export default async function jevyVet(input: Input) {
       }
       return Promise.resolve();
     },
-    'tool.execute.before': async (hook: { tool: string; sessionID?: string }, output: { args: unknown }) => {
+    'tool.execute.before': async (hook: { tool: string; sessionID?: string; callID?: string }, output: { args: unknown }) => {
       const session = hook.sessionID ?? '';
-      const reason = await review(hook.tool, output.args, {
-        userMessages: subagents.has(session) ? [] : messages.get(session) ?? [],
+      const shared = {
         load: () => loadSettings(process.env, homedir()),
         fetch: globalThis.fetch,
-        disk: { root, read: readSource, list: listDir },
-        log(message) {
-          try {
-            void input.client.app
-              .log({ body: { service: 'jevy-vet', level: 'warn', message } })
-              .catch(() => undefined);
-          } catch {
-            return;
-          }
-        },
+        disk,
+        log,
+      };
+      const reason = await review(hook.tool, output.args, {
+        ...shared,
+        userMessages: parents.has(session) ? [] : messages.get(session) ?? [],
       });
       if (reason) throw new Error(reason);
+      if (!hook.callID) return;
+      // The user of a subagent session is the user of the session that started it.
+      let top = session;
+      for (let hops = 0; hops < 10; hops += 1) {
+        const parent = parents.get(top);
+        if (parent === undefined) break;
+        top = parent;
+      }
+      // Started now so it runs while the tool does. The after hook adds the note.
+      const check = checkInstructions(hook.tool, output.args, {
+        ...shared,
+        userMessages: messages.get(top) ?? [],
+        cache: sentences,
+        instructionFiles: paths => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk),
+      }).catch(() => undefined);
+      pending.set(hook.callID, check);
+      if (pending.size > KEEP_PENDING) {
+        const oldest = pending.keys().next().value;
+        if (oldest !== undefined) pending.delete(oldest);
+      }
+    },
+    // OpenCode returns this same output object to the model, so an appended note reaches the agent.
+    'tool.execute.after': async (hook: { tool: string; sessionID: string; callID: string; args: unknown }, output: { title: string; output: string; metadata: unknown }) => {
+      const check = pending.get(hook.callID);
+      if (!check) return;
+      pending.delete(hook.callID);
+      const note = await check;
+      if (note) output.output = `${output.output}\n\n${note}`;
     },
   };
 }

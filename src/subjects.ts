@@ -331,3 +331,47 @@ export function stripComments(text: string, filePath: string): string {
   }
   return out.split('\n').map(line => line.trimEnd()).filter((line, n, all) => line !== '' || (n > 0 && all[n - 1] !== '')).join('\n').trim();
 }
+
+// One file an edit changes, test or not. Old text is contrast evidence only.
+export interface Change {
+  path: string;
+  old?: string;
+  new: string;
+}
+
+// What write, edit, and apply_patch change, for any path.
+// read(path) returns the file as it is on disk now, if it can be read.
+export function changesFrom(tool: string, args: unknown, read: (path: string) => string | undefined): Change[] {
+  if (!isRecord(args)) return [];
+  const filePath = str(args, 'filePath') ?? '';
+  if (tool === 'edit') {
+    const newText = str(args, 'newString');
+    if (filePath === '' || newText === undefined) return [];
+    return [{ path: filePath, old: str(args, 'oldString') ?? '', new: newText }];
+  }
+  if (tool === 'write') {
+    const content = str(args, 'content');
+    if (filePath === '' || content === undefined) return [];
+    const onDisk = read(filePath);
+    return [{ path: filePath, ...(onDisk === undefined ? {} : { old: onDisk }), new: content }];
+  }
+  if (tool !== 'apply_patch') return [];
+  const changes: Change[] = [];
+  for (const file of patchFiles(str(args, 'patchText') ?? '')) {
+    if (file.path === '') continue;
+    // A move is checked where the file ends up.
+    const path = file.moveTo ?? file.path;
+    if (file.op === 'delete') {
+      changes.push({ path, old: read(file.path) ?? '', new: '' });
+      continue;
+    }
+    const rows = file.rows.filter(row => !row.startsWith('@@'));
+    const newText = rows.filter(row => !row.startsWith('-')).map(row => row.slice(1)).join('\n');
+    if (file.op === 'add') {
+      changes.push({ path, new: newText });
+      continue;
+    }
+    changes.push({ path, old: rows.filter(row => !row.startsWith('+')).map(row => row.slice(1)).join('\n'), new: newText });
+  }
+  return changes;
+}
