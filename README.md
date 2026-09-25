@@ -1,6 +1,10 @@
 # jevy-vet
 
-An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have.
+[![version](https://img.shields.io/npm/v/jevy-vet?style=for-the-badge&logo=npm&logoColor=white&label=version)](https://www.npmjs.com/package/jevy-vet)
+[![downloads](https://img.shields.io/npm/dm/jevy-vet?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/jevy-vet)
+[![CI](https://img.shields.io/github/actions/workflow/status/fast-facts/jevy-vet/master.cron.publish.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=CI)](https://github.com/fast-facts/jevy-vet/actions/workflows/master.cron.publish.yml)
+[![CodeQL](https://img.shields.io/github/actions/workflow/status/fast-facts/jevy-vet/master.cron.code-analyze.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=CodeQL)](https://github.com/fast-facts/jevy-vet/actions/workflows/master.cron.code-analyze.yml)
+[![license](https://img.shields.io/github/license/fast-facts/jevy-vet?style=for-the-badge)](./LICENSE)
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
