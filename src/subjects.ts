@@ -1,9 +1,35 @@
-export interface Subject {
+interface Subject {
   path: string;
   text: string;
 }
 
-export function subjectsFrom(tool: string, args: unknown): Subject[] {
+// One test file in a write, edit, or patch.
+// cases: the new test text, one entry per test. Only these are judged.
+// setup: new text before the first test (imports, helpers). Context only.
+// source: all the new text for this file. Used to find imports.
+// edited: true when only part of the file is new (edit or patch update).
+export interface TestFile {
+  path: string;
+  cases: string[];
+  setup: string;
+  source: string;
+  edited: boolean;
+}
+
+export function testFilesFrom(tool: string, args: unknown): TestFile[] {
+  const files: TestFile[] = [];
+  for (const subject of subjectsFrom(tool, args)) {
+    const parts = splitCases(subject.text);
+    if (parts.cases.length === 0) continue;
+    const patchText = tool === 'apply_patch' && isRecord(args) ? str(args, 'patchText') ?? '' : '';
+    const added = patchText.split(/\r?\n/).some(line => line.startsWith(ADD_FILE) && line.slice(ADD_FILE.length).trim() === subject.path);
+    const wholeFile = tool === 'write' || added;
+    files.push({ path: subject.path, cases: parts.cases, setup: parts.setup, source: subject.text, edited: !wholeFile });
+  }
+  return files;
+}
+
+function subjectsFrom(tool: string, args: unknown): Subject[] {
   if (!isRecord(args)) return [];
   if (tool === 'write') return fromFile(str(args, 'filePath'), str(args, 'content'));
   if (tool === 'edit') return fromFile(str(args, 'filePath'), str(args, 'newString'));
@@ -25,7 +51,10 @@ const UPDATE_FILE = '*** Update File:';
 const MOVE_TO = '*** Move to:';
 
 function subjectsFromPatch(patchText: string): Subject[] {
-  const cleaned = stripHeredoc(patchText.trim()).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  const trimmed = patchText.trim();
+  // A pasted `cat <<EOF` wrapper is not part of the patch.
+  const heredoc = trimmed.match(/^(?:cat\s+)?<<['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*$/);
+  const cleaned = (heredoc?.[2] ?? trimmed).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
   const lines = cleaned.split('\n');
   const begin = lines.findIndex(line => line.trim() === '*** Begin Patch');
   const end = lines.findIndex(line => line.trim() === '*** End Patch');
@@ -37,7 +66,8 @@ function subjectsFromPatch(patchText: string): Subject[] {
     const line = lines[i];
     if (line.startsWith(ADD_FILE)) {
       const hunk = linesUntilHeader(lines, i + 1, end);
-      addTest(subjects, line.slice(ADD_FILE.length).trim(), addedText(hunk.rows));
+      const text = hunk.rows.filter(row => row.startsWith('+')).map(row => row.slice(1)).join('\n');
+      addTest(subjects, line.slice(ADD_FILE.length).trim(), text);
       i = hunk.next;
       continue;
     }
@@ -62,10 +92,6 @@ function addUpdatedFile(subjects: Subject[], lines: string[], start: number, end
   const text = updatedText(hunk.rows);
   if (text !== undefined) addTest(subjects, filePath, text);
   return hunk.next;
-}
-
-function addedText(rows: string[]): string {
-  return rows.filter(row => row.startsWith('+')).map(row => row.slice(1)).join('\n');
 }
 
 function updatedText(rows: string[]): string | undefined {
@@ -94,22 +120,34 @@ function linesUntilHeader(lines: string[], start: number, end: number): { rows: 
 
 function addTest(subjects: Subject[], filePath: string, text: string) {
   if (filePath === '' || text.trim() === '' || !isTestPath(filePath)) return;
-  for (const part of casesIn(text)) subjects.push({ path: filePath, text: part });
+  subjects.push({ path: filePath, text });
 }
 
 // Line-start markers: test(, it(, func Test, def test_, @Test.
 // ponytail: not a parser. A marker inside a string can split a case wrong.
-function casesIn(text: string): string[] {
-  const marks = [...text.matchAll(/^[ \t]*(?:(?:test|it)(?:\.[A-Za-z]+)?\(|func Test|def test_|@Test\b)/gm)];
-  if (marks.length < 2) return [text];
-  const parts: string[] = [];
+const CASE_MARK = /^[ \t]*(?:(?:test|it)(?:\.[A-Za-z]+)?\(|(?:async[ \t]+)?def test_|func Test|@Test\b)/gm;
+
+// Text before the first marker is setup. With no marker, the whole text is one case.
+export function splitCases(text: string): { cases: string[]; setup: string } {
+  const marks = [...text.matchAll(CASE_MARK)];
+  if (marks.length === 0) return { cases: text.trim() === '' ? [] : [text.trim()], setup: '' };
+  const cases: string[] = [];
   for (let i = 0; i < marks.length; i += 1) {
     const start = marks[i]?.index ?? 0;
     const end = marks[i + 1]?.index ?? text.length;
     const part = text.slice(start, end).trim();
-    if (part !== '') parts.push(part);
+    if (part !== '') cases.push(part);
   }
-  return parts;
+  return { cases, setup: text.slice(0, marks[0]?.index ?? 0).trim() };
+}
+
+export function titleOf(text: string): string | undefined {
+  const quoted = text.match(/^[ \t]*(?:test|it)(?:\.[A-Za-z]+)?\(\s*(['"`])((?:\\.|(?!\1).)*)\1/);
+  if (quoted?.[2]) return quoted[2];
+  const named = text.match(/^[ \t]*(?:(?:async[ \t]+)?def (test_\w+)|func (Test\w+))/);
+  if (named) return named[1] ?? named[2];
+  const java = text.match(/^[ \t]*@Test\b[\s\S]*?\b(?:void|fun)\s+(\w+)/);
+  return java?.[1];
 }
 
 function isTestPath(filePath: string): boolean {
@@ -122,11 +160,6 @@ function isTestPath(filePath: string): boolean {
   if (/^test_.+\.py$/.test(base)) return true;
   if (/Test\.(?:java|kt)$/.test(base)) return true;
   return false;
-}
-
-function stripHeredoc(input: string): string {
-  const match = input.match(/^(?:cat\s+)?<<['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*$/);
-  return match?.[2] ?? input;
 }
 
 function str(record: Record<string, unknown>, key: string): string | undefined {

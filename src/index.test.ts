@@ -11,14 +11,12 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function allowBody() {
-  const answer = { type: 'noul', noul: 0.1, confidence: 0.9 };
+  const answer = { type: 'noul', noul: 0.1 };
   return {
     model: 'jev-latest',
     answers: {
-      t0_no_visible_result: answer,
-      t0_copied_expectation: answer,
-      t0_trivial: answer,
-      t0_no_behavior: answer,
+      t0_title_mismatch: answer,
+      t0_passes_on_empty: answer,
     },
   };
 }
@@ -31,12 +29,14 @@ interface LogBody {
 
 type Hooks = Awaited<ReturnType<typeof plugin>>;
 type PluginLog = (input: { body: LogBody }) => Promise<unknown>;
+type FakeFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 async function usingPlugin(
   config: string | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FakeFetch,
   run: (hooks: Hooks) => Promise<void>,
   log: PluginLog = () => Promise.resolve(undefined),
+  directory?: string,
 ) {
   const root = mkdtempSync(join(tmpdir(), 'jevy-vet-'));
   const savedXdg = process.env.XDG_CONFIG_HOME;
@@ -47,9 +47,9 @@ async function usingPlugin(
     mkdirSync(dir);
     writeFileSync(join(dir, 'jevy-vet.jsonc'), config);
   }
-  globalThis.fetch = fetchImpl;
+  globalThis.fetch = fetchImpl as typeof fetch;
   try {
-    await run(await plugin({ client: { app: { log } } }));
+    await run(await plugin({ directory: directory ?? join(root, 'project'), client: { app: { log } } }));
   } finally {
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdg;
@@ -59,7 +59,8 @@ async function usingPlugin(
 }
 
 function before(hooks: Hooks, tool: string, args: unknown) {
-  return hooks['tool.execute.before']({ tool, sessionID: 's', callID: 'c' }, { args });
+  const input: { tool: string; sessionID: string; callID: string } = { tool, sessionID: 's', callID: 'c' };
+  return hooks['tool.execute.before'](input, { args });
 }
 
 describe('plugin', () => {
@@ -89,26 +90,26 @@ describe('plugin', () => {
     let url = '';
     let auth = '';
     const bodies: string[] = [];
-    const fetchImpl: typeof fetch = (input, init) => {
+    const fetchImpl: FakeFetch = (input, init) => {
       url = String(input);
       auth = new Headers(init?.headers).get('Authorization') ?? '';
       bodies.push(String(init?.body));
       return Promise.resolve(jsonResponse({
-        answers: { t0_no_visible_result: { noul: 0.91, confidence: 0.88 } },
+        answers: { t0_passes_on_empty: { noul: 0.91 } },
       }));
     };
-    const sure = 'It does not check a result a caller could see.';
+    const sure = 'It would still pass if the code returned null, an empty value, or zero.';
     await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret", "TYPESAFE_BASE_URL": "https://jev.example/" }', fetchImpl, async hooks => {
       await expect(before(hooks, 'write', { filePath: 'src/foo.test.ts', content: 'expect(x).toBeDefined()' }))
-        .rejects.toThrow(`src/foo.test.ts: ${sure}`);
+        .rejects.toThrow(`src/foo.test.ts (test 1): ${sure}`);
       await expect(before(hooks, 'edit', {
         filePath: 'src/bar.test.ts',
         oldString: 'OLD_NOT_JUDGED',
         newString: 'expect(x).toBeDefined()',
-      })).rejects.toThrow(`src/bar.test.ts: ${sure}`);
+      })).rejects.toThrow(`src/bar.test.ts (test 1): ${sure}`);
       const patch = ['*** Begin Patch', '*** Add File: src/bad.test.ts', '+expect(x).toBeDefined()', '*** End Patch'].join('\n');
       await expect(before(hooks, 'apply_patch', { patchText: patch }))
-        .rejects.toThrow(`src/bad.test.ts: ${sure}`);
+        .rejects.toThrow(`src/bad.test.ts (test 1): ${sure}`);
     });
     expect(url).toBe('https://jev.example/v1/systemone');
     expect(auth).toBe('Bearer ts_secret');
@@ -120,7 +121,7 @@ describe('plugin', () => {
 
   test('allows a passing test and skips a non-test write', async () => {
     let called = 0;
-    const fetchImpl: typeof fetch = () => {
+    const fetchImpl: FakeFetch = () => {
       called += 1;
       return Promise.resolve(jsonResponse(allowBody()));
     };
@@ -162,23 +163,51 @@ describe('plugin', () => {
     const mocked = 'test(\'calls the mock\', () => { expect(spy).toHaveBeenCalled() })';
     const adds = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
     let body = '';
-    const fetchImpl: typeof fetch = (_input, init) => {
+    const fetchImpl: FakeFetch = (_input, init) => {
       body = String(init?.body);
       return Promise.resolve(jsonResponse({
-        answers: { t0_no_visible_result: { noul: 0.91, confidence: 0.9 } },
+        answers: { t0_passes_on_empty: { noul: 0.91 } },
       }));
     };
     await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
       await expect(before(hooks, 'write', { filePath: 'src/mixed.test.ts', content: [mocked, adds].join('\n') }))
-        .rejects.toThrow('src/mixed.test.ts: It does not check a result a caller could see.');
+        .rejects.toThrow('src/mixed.test.ts (test "calls the mock"): It would still pass if the code returned null, an empty value, or zero.');
     });
-    const parsed = JSON.parse(body) as { state: { tests: { text: string }[] } };
-    expect(parsed.state.tests.map(item => item.text)).toEqual([mocked, adds]);
+    const parsed = JSON.parse(body) as { state: { files: { cases: { test: string }[] }[] } };
+    expect(parsed.state.files[0].cases.map(item => item.test)).toEqual([mocked, adds]);
     expect(body).not.toContain('ts_secret');
   });
 
+  test('reads the code under test from the project folder only', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'jevy-vet-project-'));
+    const outside = mkdtempSync(join(tmpdir(), 'jevy-vet-outside-'));
+    let body = '';
+    try {
+      mkdirSync(join(project, 'src'));
+      writeFileSync(join(project, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b }');
+      writeFileSync(join(outside, 'secret.ts'), 'export const SECRET_OUTSIDE = 1');
+      const rel = join('..', '..', outside.slice(outside.lastIndexOf('/') + 1), 'secret');
+      const content = [`import { add } from './math';`, `import { SECRET_OUTSIDE } from '${rel}';`, USEFUL].join('\n');
+      const fetchImpl: FakeFetch = (_input, init) => {
+        body = String(init?.body);
+        return Promise.resolve(jsonResponse(allowBody()));
+      };
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+        await expect(before(hooks, 'write', { filePath: join(project, 'src', 'math.test.ts'), content })).resolves.toBeUndefined();
+      }, undefined, project);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+    const parsed = JSON.parse(body) as { state: { files: { code_under_test: { path: string; text: string; truncated: boolean }[] }[] } };
+    expect(parsed.state.files[0].code_under_test).toEqual([
+      { path: 'src/math.ts', text: 'export function add(a: number, b: number) { return a + b }', truncated: false },
+    ]);
+    expect(body).not.toContain('export const SECRET_OUTSIDE');
+  });
+
   test('still allows the write when logging fails', async () => {
-    const down: typeof fetch = () => Promise.resolve(jsonResponse({ error: 'down' }, 503));
+    const down: FakeFetch = () => Promise.resolve(jsonResponse({ error: 'down' }, 503));
     const args = { filePath: 'src/foo.test.ts', content: USEFUL };
     await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', down, async hooks => {
       await expect(before(hooks, 'write', args)).resolves.toBeUndefined();

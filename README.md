@@ -10,16 +10,21 @@ It watches `write`, `edit`, and `apply_patch`. It only looks at paths that look 
 
 A file with more than one test is judged one test at a time. One bad test blocks the write.
 
-It blocks the write when Jev is sure the test fails one of these rules:
+It blocks the write when Jev is sure a test fails one of these rules:
 
-- It does not check a result a caller could see.
-- The expected value is computed the same way as the code under test.
-- It only tests a getter, setter, or a constructor that stores fields.
-- It does not check a rule, a boundary, or a failure mode.
+- Its title promises a behavior that none of its assertions check.
+- It would still pass if the code returned null, an empty value, or zero.
+- The expected value is computed with the same logic as the code under test.
+- It replaces the code it tests with a mock or stub.
+- The code it tests is only a getter, a setter, or a constructor that stores fields.
+
+Along with each test, Jev sees the rest of the test file's setup (imports and helpers) and the code under test. The plugin reads that code from the project folder. It follows relative imports in the test file and looks for the usual source file next to it: `foo.test.ts` → `foo.ts`, `__tests__/foo.ts` → `foo.ts`, `test_foo.py` → `foo.py`, a Go test's own package, and `src/test/…/FooTest.java` → `src/main/…/Foo.java`. It does not read outside the project folder, in `node_modules`, or other test files. A large file is cut to the imported definitions, or to its head and tail. If no code under test is found, the last three rules are not asked.
+
+Only the new test text is judged.
 
 A score below 0.8 is allowed. If Jev is unsure, the write is allowed. If TypeSafe is down, the write is allowed. If the config file is missing, unreadable, or has no `TYPESAFE_API_KEY`, the test write is blocked.
 
-It does not prove the test would catch a real bug. That needs a run, and for a stronger check, mutation testing. This plugin only reads the new test text.
+It does not prove the test would catch a real bug. That needs a run, and for a stronger check, mutation testing. This plugin only reads the new test text and the code around it.
 
 ## Add it to OpenCode
 

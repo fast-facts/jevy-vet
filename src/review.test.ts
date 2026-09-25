@@ -4,7 +4,7 @@ import { type Settings } from './settings.ts';
 
 const USEFUL = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
 
-function deps(fetchImpl: ReviewDeps['fetch'], settings: Partial<Settings> = { key: 'ts_secret' }): ReviewDeps & { logs: string[]; loads: number } {
+function deps(fetchImpl: ReviewDeps['fetch'], settings: Partial<Settings> = { key: 'ts_secret' }, disk?: ReviewDeps['disk']): ReviewDeps & { logs: string[]; loads: number } {
   const logs: string[] = [];
   let loads = 0;
   return {
@@ -18,6 +18,7 @@ function deps(fetchImpl: ReviewDeps['fetch'], settings: Partial<Settings> = { ke
       };
     },
     fetch: fetchImpl,
+    disk,
     log: message => {
       logs.push(message);
     },
@@ -33,14 +34,47 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function allowBody() {
-  const answer = { type: 'noul', noul: 0.1, confidence: 0.9 };
+  const answer = { type: 'noul', noul: 0.1 };
   return {
     model: 'jev-latest',
     answers: {
-      t0_no_visible_result: answer,
+      t0_title_mismatch: answer,
+      t0_passes_on_empty: answer,
       t0_copied_expectation: answer,
-      t0_trivial: answer,
-      t0_no_behavior: answer,
+      t0_mocks_code_under_test: answer,
+      t0_trivial_code: answer,
+    },
+  };
+}
+
+interface SentBody {
+  model: string;
+  state: {
+    purpose: string;
+    files: {
+      path: string;
+      setup: string;
+      setup_truncated?: boolean;
+      code_under_test: { path: string; text: string; truncated: boolean }[];
+      cases: { id: string; title?: string; test: string; truncated?: boolean }[];
+    }[];
+  };
+  questions: Record<string, { type: string; instructions: string; criteria: { true: string; false: string } }>;
+}
+
+function memoryDisk(files: Record<string, string>, root = '/repo') {
+  const reads: string[] = [];
+  return {
+    reads,
+    disk: {
+      root,
+      read(path: string) {
+        reads.push(path);
+        return files[path];
+      },
+      list(dir: string) {
+        return Object.keys(files).filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/')).map(path => path.slice(dir.length + 1));
+      },
     },
   };
 }
@@ -83,16 +117,13 @@ describe('review', () => {
     expect(auth).toBe('Bearer ts_secret');
     expect(body).toContain(USEFUL);
     expect(body).not.toContain('ts_secret');
-    const parsed = JSON.parse(body) as {
-      model: string;
-      questions: Record<string, { type: string; criteria: { true: string; false: string } }>;
-    };
+    const parsed = JSON.parse(body) as SentBody;
     expect(parsed.model).toBe('jev-latest');
-    expect(parsed.questions.t0_no_visible_result.type).toBe('noul');
-    expect(parsed.questions.t0_no_visible_result.criteria).toEqual({ true: 'yes', false: 'no' });
-    expect(parsed.questions.t0_copied_expectation).toBeDefined();
-    expect(parsed.questions.t0_trivial).toBeDefined();
-    expect(parsed.questions.t0_no_behavior).toBeDefined();
+    expect(parsed.questions.t0_title_mismatch.type).toBe('noul');
+    expect(parsed.questions.t0_title_mismatch.criteria).toEqual({ true: 'yes', false: 'no' });
+    expect(parsed.questions.t0_title_mismatch.instructions).toContain('`files[0].cases[0].test`');
+    expect(parsed.questions.t0_passes_on_empty.criteria.true).toContain('No assertion would notice');
+    expect(parsed.state.files[0].cases[0]).toEqual({ id: 't0', title: 'adds', test: USEFUL });
   });
 
   test('uses TYPESAFE_BASE_URL and drops a trailing slash', async () => {
@@ -130,21 +161,19 @@ describe('review', () => {
   test('blocks when a hard rule is confident', async () => {
     const result = await review('edit', { filePath: 'src/foo.test.ts', oldString: 'old', newString: 'expect(x).toBeDefined()' }, deps(() => Promise.resolve(jsonResponse({
       answers: {
-        t0_no_visible_result: { noul: 0.91, confidence: 0.88 },
-        t0_copied_expectation: { noul: 0.1 },
-        t0_trivial: { noul: 0.2 },
-        t0_no_behavior: { noul: 0.2 },
+        t0_passes_on_empty: { noul: 0.91 },
+        t0_title_mismatch: { noul: 0.1 },
       },
     }))));
-    expect(result).toContain('src/foo.test.ts');
-    expect(result).toContain('It does not check a result a caller could see.');
+    expect(result).toContain('src/foo.test.ts (test 1): It would still pass if the code returned null, an empty value, or zero.');
+    expect(result).not.toContain('title');
     expect(result).not.toContain('old');
   });
 
   test('allows a low score and an uncertain high score', async () => {
     const low = await review('write', { filePath: 'foo.test.ts', content: USEFUL }, deps(() => Promise.resolve(jsonResponse(allowBody()))));
     const unsure = await review('write', { filePath: 'foo.test.ts', content: USEFUL }, deps(() => Promise.resolve(jsonResponse({
-      answers: { t0_trivial: { noul: 0.99, confidence: 0.4 } },
+      answers: { t0_passes_on_empty: { noul: 0.99, confidence: 0.4 } },
     }))));
     expect(low).toBeUndefined();
     expect(unsure).toBeUndefined();
@@ -152,10 +181,9 @@ describe('review', () => {
 
   test('blocks when confidence is missing and noul is at the line', async () => {
     const result = await review('write', { filePath: 'foo_test.go', content: 'func TestGet(t *testing.T) {}' }, deps(() => Promise.resolve(jsonResponse({
-      answers: { t0_no_behavior: { noul: 0.8 } },
+      answers: { t0_title_mismatch: { noul: 0.8 } },
     }))));
-    expect(result).toContain('foo_test.go');
-    expect(result).toContain('It does not check a rule, a boundary, or a failure mode.');
+    expect(result).toContain('foo_test.go (test "TestGet"): Its title promises a behavior that none of its assertions check.');
   });
 
   test('allows the write when TypeSafe fails', async () => {
@@ -186,15 +214,16 @@ describe('review', () => {
       body = String(init?.body);
       return Promise.resolve(jsonResponse({
         answers: {
-          t0_no_visible_result: { noul: 0.1 },
-          t1_copied_expectation: { noul: 0.92, confidence: 0.9 },
+          t0_title_mismatch: { noul: 0.1 },
+          t1_title_mismatch: { noul: 0.1 },
         },
       }));
     }));
-    const parsed = JSON.parse(body) as { state: { tests: { path: string; text: string }[] } };
-    expect(parsed.state.tests.map(item => item.path)).toEqual(['src/foo.test.ts', 'src/bar.test.ts']);
-    expect(parsed.state.tests[0].text).toBe(USEFUL);
-    expect(parsed.state.tests[1].text).toContain('expect(bar()).toBe(1)');
+    const parsed = JSON.parse(body) as SentBody;
+    expect(parsed.state.files.map(item => item.path)).toEqual(['src/foo.test.ts', 'src/bar.test.ts']);
+    expect(parsed.state.files[0].cases[0].test).toBe(USEFUL);
+    expect(parsed.state.files[1].cases[0].test).toContain('expect(bar()).toBe(1)');
+    expect(parsed.questions.t1_title_mismatch.instructions).toContain('`files[1].cases[0].test`');
   });
 
   test('names only the failing file in a patch', async () => {
@@ -208,8 +237,8 @@ describe('review', () => {
     ].join('\n');
     const result = await review('apply_patch', { patchText: patch }, deps(() => Promise.resolve(jsonResponse({
       answers: {
-        t0_no_visible_result: { noul: 0.1, confidence: 0.9 },
-        t1_no_visible_result: { noul: 0.93, confidence: 0.91 },
+        t0_passes_on_empty: { noul: 0.1 },
+        t1_passes_on_empty: { noul: 0.93 },
       },
     }))));
     expect(result).toContain('src/bad.test.ts');
@@ -239,22 +268,136 @@ describe('review', () => {
     expect(body).toContain(USEFUL);
   });
 
-  test('cuts long test text and says it was cut', async () => {
+  test('keeps the head and tail of a long test and says it was cut', async () => {
     let body = '';
-    const content = `${'a'.repeat(2001)}TAIL`;
+    const content = `test('long', () => {${'a'.repeat(20_000)}TAIL })`;
     await review('write', { filePath: 'foo.test.ts', content }, deps((_url, init) => {
       body = String(init?.body);
       return Promise.resolve(jsonResponse(allowBody()));
     }));
-    const parsed = JSON.parse(body) as { state: { tests: { text: string; truncated: boolean }[] }; questions: Record<string, { instructions: string }> };
-    expect(parsed.state.tests[0].truncated).toBe(true);
-    expect(parsed.state.tests[0].text).toHaveLength(2000);
-    expect(parsed.state.tests[0].text).not.toContain('TAIL');
-    expect(parsed.questions.t0_trivial.instructions).toContain('cut off');
+    const parsed = JSON.parse(body) as SentBody;
+    const sent = parsed.state.files[0].cases[0];
+    expect(sent.truncated).toBe(true);
+    expect(sent.test.length).toBeLessThanOrEqual(12_000);
+    expect(sent.test.length).toBeGreaterThan(2000);
+    expect(sent.test).toStartWith('test(\'long\'');
+    expect(sent.test).toContain('TAIL })');
+    expect(sent.test).toContain('characters cut');
+    expect(parsed.questions.t0_title_mismatch.instructions).toContain('cut');
+  });
+
+  test('does not cut a test under the limit', async () => {
+    let body = '';
+    const content = `test('mid', () => {${'a'.repeat(5000)}})`;
+    await review('write', { filePath: 'foo.test.ts', content }, deps((_url, init) => {
+      body = String(init?.body);
+      return Promise.resolve(jsonResponse(allowBody()));
+    }));
+    const parsed = JSON.parse(body) as SentBody;
+    expect(parsed.state.files[0].cases[0].test).toBe(content);
+    expect(parsed.state.files[0].cases[0].truncated).toBeUndefined();
+  });
+
+  test('skips code-under-test questions when no code under test is found', async () => {
+    let body = '';
+    await review('write', { filePath: '/repo/src/foo.test.ts', content: USEFUL }, deps((_url, init) => {
+      body = String(init?.body);
+      return Promise.resolve(jsonResponse(allowBody()));
+    }, { key: 'ts_secret' }, memoryDisk({}).disk));
+    const parsed = JSON.parse(body) as SentBody;
+    expect(Object.keys(parsed.questions).sort()).toEqual(['t0_passes_on_empty', 't0_title_mismatch']);
+    expect(parsed.state.files[0].code_under_test).toEqual([]);
+  });
+
+  test('sends the imported code, the setup, and each test as its own case', async () => {
+    let body = '';
+    const content = [
+      'import { add } from \'./math\';',
+      'const twice = (n: number) => add(n, n);',
+      'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })',
+      'test(\'doubles\', () => { expect(twice(2)).toBe(4) })',
+    ].join('\n');
+    const code = 'export function add(a: number, b: number) { return a + b }';
+    const { disk } = memoryDisk({ '/repo/src/math.ts': code });
+    const result = await review('write', { filePath: '/repo/src/math.test.ts', content }, deps((_url, init) => {
+      body = String(init?.body);
+      return Promise.resolve(jsonResponse({ answers: { t1_copied_expectation: { noul: 0.95 } } }));
+    }, { key: 'ts_secret' }, disk));
+    const parsed = JSON.parse(body) as SentBody;
+    const file = parsed.state.files[0];
+    expect(file.setup).toContain('const twice');
+    expect(file.code_under_test).toEqual([{ path: 'src/math.ts', text: code, truncated: false }]);
+    expect(file.cases.map(item => item.title)).toEqual(['adds', 'doubles']);
+    expect(file.cases[0].test).not.toContain('import');
+    expect(Object.keys(parsed.questions)).toHaveLength(10);
+    expect(parsed.questions.t1_copied_expectation.instructions).toContain('`files[0].code_under_test`');
+    expect(parsed.questions.t1_trivial_code.instructions).toContain('`files[0].cases[1].test`');
+    expect(result).toBe([
+      'Jevy blocked this test write.',
+      '/repo/src/math.test.ts (test "doubles"): The expected value is computed with the same logic as the code under test.',
+      'Rewrite the test so a wrong result would fail it, or do not add it.',
+    ].join('\n'));
+  });
+
+  test('reads setup and imports from the file on disk for an edit, but judges only newString', async () => {
+    let body = '';
+    const onDisk = ['import { add } from \'./math\';', 'test(\'old\', () => { expect(add(2, 2)).toBe(4) })'].join('\n');
+    const { disk } = memoryDisk({
+      '/repo/src/math.test.ts': onDisk,
+      '/repo/src/math.ts': 'export const add = (a: number, b: number) => a + b',
+    });
+    await review('edit', {
+      filePath: 'src/math.test.ts',
+      oldString: 'OLD_NOT_JUDGED',
+      newString: 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })',
+    }, deps((_url, init) => {
+      body = String(init?.body);
+      return Promise.resolve(jsonResponse(allowBody()));
+    }, { key: 'ts_secret' }, disk));
+    const parsed = JSON.parse(body) as SentBody;
+    const file = parsed.state.files[0];
+    expect(file.setup).toBe('import { add } from \'./math\';');
+    expect(file.code_under_test.map(item => item.path)).toEqual(['src/math.ts']);
+    expect(file.cases).toHaveLength(1);
+    expect(file.cases[0].test).toContain('adds');
+    expect(body).not.toContain('test(\'old\'');
+    expect(body).not.toContain('OLD_NOT_JUDGED');
+  });
+
+  test('splits many tests into more than one request and merges the answers', async () => {
+    const bodies: SentBody[] = [];
+    const content = Array.from({ length: 30 }, (_v, i) => `test('case ${i}', () => { expect(f(${i})).toBe(${i}) })`).join('\n');
+    const { disk } = memoryDisk({ '/repo/f.ts': 'export const f = (n: number) => n' });
+    const result = await review('write', { filePath: '/repo/f.test.ts', content }, deps((_url, init) => {
+      const parsed = JSON.parse(String(init?.body)) as SentBody;
+      bodies.push(parsed);
+      const answers = 't29_mocks_code_under_test' in parsed.questions ? { t29_mocks_code_under_test: { noul: 0.9 } } : {};
+      return Promise.resolve(jsonResponse({ answers }));
+    }, { key: 'ts_secret' }, disk));
+    expect(bodies).toHaveLength(2);
+    expect(bodies.every(body => Object.keys(body.questions).length <= 100)).toBe(true);
+    expect(bodies.every(body => body.state.files[0].code_under_test.length === 1)).toBe(true);
+    expect(bodies[1].state.files[0].cases[0].id).toBe('t20');
+    expect(bodies[1].questions.t20_title_mismatch.instructions).toContain('`files[0].cases[0].test`');
+    expect(result).toContain('/repo/f.test.ts (test "case 29"): It replaces the code it tests with a mock or stub.');
+  });
+
+  test('still blocks on one request when another request fails', async () => {
+    let calls = 0;
+    const content = Array.from({ length: 30 }, (_v, i) => `test('case ${i}', () => { expect(f(${i})).toBe(${i}) })`).join('\n');
+    const { disk } = memoryDisk({ '/repo/f.ts': 'export const f = (n: number) => n' });
+    const used = deps(() => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(jsonResponse({ error: 'down' }, 503));
+      return Promise.resolve(jsonResponse({ answers: { t25_title_mismatch: { noul: 0.9 } } }));
+    }, { key: 'ts_secret' }, disk);
+    const result = await review('write', { filePath: '/repo/f.test.ts', content }, used);
+    expect(result).toContain('test "case 25"');
+    expect(used.logs).toEqual(['TypeSafe returned 503. The test write was allowed.']);
   });
 
   test('recognizes common test paths', async () => {
-    const paths = ['a.test.ts', 'a.spec.tsx', 'a.test.mjs', 'foo_test.go', 'foo_test.py', 'test_foo.py', 'FooTest.java', 'src/__tests__/foo.ts', 'src/foo.ts', 'latest.kt', 'fixture.json'];
+    const paths = ['a.test.ts', 'a.spec.tsx', 'a.test.mjs', 'foo_test.go', 'foo_test.rs', 'foo_test.exs', 'foo_test.py', 'test_foo.py', 'FooTest.java', 'FooTest.kt', 'src/__tests__/foo.ts', 'src/foo.ts', 'latest.kt', 'fixture.json'];
     const judged: string[] = [];
     for (const filePath of paths) {
       let called = false;
@@ -264,6 +407,6 @@ describe('review', () => {
       }));
       if (called) judged.push(filePath);
     }
-    expect(judged).toEqual(['a.test.ts', 'a.spec.tsx', 'a.test.mjs', 'foo_test.go', 'foo_test.py', 'test_foo.py', 'FooTest.java', 'src/__tests__/foo.ts']);
+    expect(judged).toEqual(['a.test.ts', 'a.spec.tsx', 'a.test.mjs', 'foo_test.go', 'foo_test.rs', 'foo_test.exs', 'foo_test.py', 'test_foo.py', 'FooTest.java', 'FooTest.kt', 'src/__tests__/foo.ts']);
   });
 });

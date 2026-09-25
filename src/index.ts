@@ -1,8 +1,11 @@
 import { homedir } from 'node:os';
+import { listDir, readSource } from './context.ts';
 import { review } from './review.ts';
 import { loadSettings } from './settings.ts';
 
 interface Input {
+  // The project folder. OpenCode passes it. The code under test is only read from inside it.
+  directory?: string;
   client: {
     app: {
       log(input: {
@@ -20,11 +23,13 @@ interface Input {
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
+  const root = input.directory ?? process.cwd();
   return {
     'tool.execute.before': async (hook: { tool: string }, output: { args: unknown }) => {
       const reason = await review(hook.tool, output.args, {
         load: () => loadSettings(process.env, homedir()),
         fetch: globalThis.fetch,
+        disk: { root, read: readSource, list: listDir },
         log(message) {
           try {
             void input.client.app
