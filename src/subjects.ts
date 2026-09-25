@@ -94,7 +94,22 @@ function linesUntilHeader(lines: string[], start: number, end: number): { rows: 
 
 function addTest(subjects: Subject[], filePath: string, text: string) {
   if (filePath === '' || text.trim() === '' || !isTestPath(filePath)) return;
-  subjects.push({ path: filePath, text });
+  for (const part of casesIn(text)) subjects.push({ path: filePath, text: part });
+}
+
+// Line-start markers: test(, it(, func Test, def test_, @Test.
+// ponytail: not a parser. A marker inside a string can split a case wrong.
+function casesIn(text: string): string[] {
+  const marks = [...text.matchAll(/^[ \t]*(?:(?:test|it)(?:\.[A-Za-z]+)?\(|func Test|def test_|@Test\b)/gm)];
+  if (marks.length < 2) return [text];
+  const parts: string[] = [];
+  for (let i = 0; i < marks.length; i += 1) {
+    const start = marks[i]?.index ?? 0;
+    const end = marks[i + 1]?.index ?? text.length;
+    const part = text.slice(start, end).trim();
+    if (part !== '') parts.push(part);
+  }
+  return parts;
 }
 
 function isTestPath(filePath: string): boolean {

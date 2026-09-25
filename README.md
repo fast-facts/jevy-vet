@@ -8,6 +8,8 @@ The first check is tests. The name is not limited to tests. Later checks can liv
 
 It watches `write`, `edit`, and `apply_patch`. It only looks at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
 
+A file with more than one test is judged one test at a time. One bad test blocks the write.
+
 It blocks the write when Jev is sure the test fails one of these rules:
 
 - It does not check a result a caller could see.

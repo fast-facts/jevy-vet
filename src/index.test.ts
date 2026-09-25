@@ -158,6 +158,25 @@ describe('plugin', () => {
     }]);
   });
 
+  test('blocks one bad test in a file of several', async () => {
+    const mocked = 'test(\'calls the mock\', () => { expect(spy).toHaveBeenCalled() })';
+    const adds = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
+    let body = '';
+    const fetchImpl: typeof fetch = (_input, init) => {
+      body = String(init?.body);
+      return Promise.resolve(jsonResponse({
+        answers: { t0_no_visible_result: { noul: 0.91, confidence: 0.9 } },
+      }));
+    };
+    await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+      await expect(before(hooks, 'write', { filePath: 'src/mixed.test.ts', content: [mocked, adds].join('\n') }))
+        .rejects.toThrow('src/mixed.test.ts: It does not check a result a caller could see.');
+    });
+    const parsed = JSON.parse(body) as { state: { tests: { text: string }[] } };
+    expect(parsed.state.tests.map(item => item.text)).toEqual([mocked, adds]);
+    expect(body).not.toContain('ts_secret');
+  });
+
   test('still allows the write when logging fails', async () => {
     const down: typeof fetch = () => Promise.resolve(jsonResponse({ error: 'down' }, 503));
     const args = { filePath: 'src/foo.test.ts', content: USEFUL };
