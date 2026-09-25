@@ -40,6 +40,8 @@ export type Step = RanCommand | Edited;
 
 interface ClaimDeps extends ReviewDeps {
   steps: Step[];
+  // Earlier turns in this session, oldest first.
+  pastSteps?: Step[];
 }
 
 interface ClaimRequest {
@@ -49,6 +51,7 @@ interface ClaimRequest {
     final_message: string;
     claims: string[];
     steps: Step[];
+    past_steps?: Step[];
   };
   questions: Record<string, Question>;
 }
@@ -62,12 +65,21 @@ export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ f
 
   const once = logOnce(deps);
   const userMessages = deps.userMessages ?? [];
+  // Earlier committed work still backs a summary. Skipped when empty so the first turn is unchanged.
+  const past = deps.pastSteps ?? [];
+  const hasPast = past.length > 0;
+  const when = hasPast ? 'in this session' : 'since the user\'s last message';
+  const criteria = { ...CLAIM_CHOICES };
+  if (hasPast) {
+    criteria.supported = `The steps or past_steps show it, or the sentence is not a claim about work done ${when}, for example a plan, a question, a caveat, or advice.`;
+    criteria.no_change = 'It says something was fixed, changed, added, or removed, but no edit in `steps` or `past_steps` touches the files or code it names.';
+  }
   const questions: Record<string, Question> = {};
   for (const n of claims.keys()) {
     questions[`c${n}_support`] = {
       type: 'choice',
-      instructions: `Is the claim in \`claims[${n}]\` backed by what happened in \`steps\`?`,
-      criteria: CLAIM_CHOICES,
+      instructions: `Is the claim in \`claims[${n}]\` backed by what happened in \`steps\`${hasPast ? ' or `past_steps`' : ''}?`,
+      criteria,
     };
   }
   if (userMessages.length > 0) {
@@ -75,11 +87,12 @@ export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ f
   }
   const request: ClaimRequest = {
     state: {
-      purpose: 'Decide whether each claim in `claims`, taken from the agent\'s final message in `final_message`, is backed by what happened since the user\'s last message. `steps` lists, oldest first, each shell command the agent ran with its exit code and the head and tail of its output, and each file it changed. The final message came after the last step. Work done outside these tools is not seen.',
+      purpose: `Decide whether each claim in \`claims\`, taken from the agent's final message in \`final_message\`, is backed by what happened ${when}. \`steps\` lists, oldest first, each shell command the agent ran ${hasPast ? 'since the user\'s last message ' : ''}with its exit code and the head and tail of its output, and each file it changed.${hasPast ? ' `past_steps` lists earlier commands and edits from this session, oldest first, including work already committed. A correct summary of that earlier work counts as backed.' : ''} The final message came after the last step. Work done outside these tools is not seen.`,
       ...(userMessages.length > 0 ? { user_messages: userMessages } : {}),
       final_message: headTail(message, MAX_FINAL_MESSAGE_CHARS).text,
       claims,
       steps: deps.steps,
+      ...(hasPast ? { past_steps: past } : {}),
     },
     questions,
   };

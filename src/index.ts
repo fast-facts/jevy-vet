@@ -87,6 +87,8 @@ export default async function jevyVet(input: Input) {
   const pending = new Map<string, Promise<string | undefined>>();
   // Commands and edits per top-level session since the user's last message, for the claim check.
   const steps = new Map<string, Step[]>();
+  // Earlier turns, so a summary of committed work still counts as backed.
+  const past = new Map<string, Step[]>();
   // messageCount when each session was last checked. One check per user message.
   const checked = new Map<string, number>();
   const disk = { root, read: readSource, list: listDir };
@@ -119,7 +121,8 @@ export default async function jevyVet(input: Input) {
       if (oldest !== undefined) map.delete(oldest);
     }
   };
-  const record = (session: string, step: Step) => remember(steps, session, [...steps.get(session) ?? [], step].slice(-KEEP_STEPS));
+  const append = (map: Map<string, Step[]>, session: string, added: Step[]) => remember(map, session, [...map.get(session) ?? [], ...added].slice(-KEEP_STEPS));
+  const record = (session: string, step: Step) => append(steps, session, [step]);
   const checkTurn = async (session: string) => {
     // A subagent reports to its parent agent, not to the user.
     if (parents.has(session)) return;
@@ -141,7 +144,7 @@ export default async function jevyVet(input: Input) {
       .join('\n')
       .trim();
     if (text === '') return;
-    const found = await checkClaims(text, { load, fetch: globalThis.fetch, log, userMessages: messages.get(session) ?? [], steps: steps.get(session) ?? [] });
+    const found = await checkClaims(text, { load, fetch: globalThis.fetch, log, userMessages: messages.get(session) ?? [], steps: steps.get(session) ?? [], pastSteps: past.get(session) });
     // A newer user message starts a new turn, and the finding is stale.
     if (!found || (counts.get(session) ?? 0) !== count) return;
     // Same agent and model as the user's turn, so a plan-only agent is not switched to one that edits.
@@ -187,8 +190,12 @@ export default async function jevyVet(input: Input) {
       messages.delete(hook.sessionID);
       messages.set(hook.sessionID, kept);
       counts.set(hook.sessionID, (counts.get(hook.sessionID) ?? 0) + 1);
-      // A new turn. Steps before it do not back a claim made after it.
-      if (!parents.has(hook.sessionID)) steps.delete(hook.sessionID);
+      // A new turn. Recent steps move to past, so a summary of earlier work still counts as backed.
+      if (!parents.has(hook.sessionID)) {
+        const cur = steps.get(hook.sessionID);
+        if (cur?.length) append(past, hook.sessionID, cur);
+        steps.delete(hook.sessionID);
+      }
       if (messages.size > KEEP_SESSIONS) {
         const oldest = messages.keys().next().value;
         if (oldest !== undefined) {

@@ -12,18 +12,18 @@ describe('claim check', () => {
   const choice = (picked: string, probability = 0.92) => ({ type: 'choice', choice: picked, probabilities: { [picked]: probability }, confidence: 0.9 });
 
   interface ClaimBody {
-    state: { purpose: string; user_messages?: string[]; final_message: string; claims: string[]; steps: Step[] };
+    state: { purpose: string; user_messages?: string[]; final_message: string; claims: string[]; steps: Step[]; past_steps?: Step[] };
     questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }>;
   }
 
-  function run(message: string, steps: Step[], answers: Record<string, unknown>, options: { userMessages?: string[]; settings?: Partial<Settings>; fail?: boolean } = {}) {
+  function run(message: string, steps: Step[], answers: Record<string, unknown>, options: { userMessages?: string[]; pastSteps?: Step[]; settings?: Partial<Settings>; fail?: boolean } = {}) {
     const bodies: ClaimBody[] = [];
     const used = deps((_url, init) => {
       bodies.push(JSON.parse(String(init.body)) as ClaimBody);
       if (options.fail) return Promise.reject(new Error('offline'));
       return Promise.resolve(jsonResponse({ answers }));
     }, options.settings ?? { key: 'ts_secret' });
-    return { result: checkClaims(message, { ...used, steps, userMessages: options.userMessages }), bodies, used };
+    return { result: checkClaims(message, { ...used, steps, userMessages: options.userMessages, pastSteps: options.pastSteps }), bodies, used };
   }
 
   test('asks one choice per claim in one call, with the steps and the final message', async () => {
@@ -116,5 +116,29 @@ describe('claim check', () => {
     const failing = run(FINAL, failed, {}, { fail: true });
     expect(await failing.result).toBeUndefined();
     expect(failing.used.logs).toEqual(['TypeSafe request failed. No claim note was added.']);
+  });
+
+  test('does not flag a summary of earlier committed work, but still flags a new unsupported claim', async () => {
+    const past: Step[] = [{ edited: ['src/price.ts'] }, { command: 'bun test', exit: 0, output: 'ok' }];
+    const ok = run(FINAL, [], { c0_support: choice('supported'), c1_support: choice('supported') }, { pastSteps: past });
+    expect(await ok.result).toBeUndefined();
+    expect(ok.bodies).toHaveLength(1);
+    expect(ok.bodies[0]?.state.steps).toEqual([]);
+    expect(ok.bodies[0]?.state.past_steps).toEqual(past);
+    expect(ok.bodies[0]?.state.purpose).toContain('past_steps');
+    expect(ok.bodies[0]?.questions.c0_support.instructions).toContain('past_steps');
+    expect(ok.bodies[0]?.questions.c0_support.criteria.supported).toContain('past_steps');
+
+    const bare = run(FINAL, failed, {});
+    expect(await bare.result).toBeUndefined();
+    expect(bare.bodies[0]?.state.past_steps).toBeUndefined();
+    expect(bare.bodies[0]?.state.purpose).not.toContain('past_steps');
+
+    const unrelated: Step[] = [{ edited: ['README.md'] }];
+    const bad = run(FINAL, [], { c0_support: choice('no_change') }, { pastSteps: unrelated });
+    const flagged = await bad.result;
+    expect(bad.bodies[0]?.state.past_steps).toEqual(unrelated);
+    expect(flagged?.followUp).toContain('Jevy check: your last message says something this session does not show.');
+    expect(flagged?.note).toContain('Claim not backed: No edit touched what it says was changed.');
   });
 });
