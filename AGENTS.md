@@ -9,7 +9,7 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The
 
 ## Layout
 
-- `src/index.ts` — plugin entry. The only export must be the default function. It also keeps the user's latest messages per session from `chat.message`, skips subagent sessions, starts the instruction check in `tool.execute.before`, and adds its note in `tool.execute.after`, matched by `callID`.
+- `src/index.ts` — plugin entry. The only export must be the default function. It also keeps the user's latest messages per session from `chat.message`, skips subagent sessions, keeps blocks per top-level session, starts the instruction check in `tool.execute.before`, and adds the notes in `tool.execute.after`, matched by `callID`.
 - `src/index.test.ts` — plugin hook tests.
 - `src/settings.ts` — read `jevy-vet.jsonc` when a write is about to happen. Do not read it at import time.
 - `src/settings.test.ts` — config read tests.
@@ -17,7 +17,7 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The
 - `src/subjects.test.ts` — splitting and title tests.
 - `src/context.ts` — the setup and the code under test read from the project folder, and the instruction files OpenCode loads, split into sentences. Context only.
 - `src/context.test.ts` — code-under-test lookup, instruction file, and sentence tests.
-- `src/review.ts` — what to judge, the TypeSafe call, the block decision, and the instruction check.
+- `src/review.ts` — what to judge, the TypeSafe call, the block or note decision, the user's allow, and the instruction check.
 - `src/review.test.ts` — block decision tests.
 
 ## Rules
@@ -31,6 +31,8 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The
 - The note names the file and quotes the instruction. It says the change was made, and tells the agent to undo it or ask the user.
 - Never check changes inside `node_modules` or to `jevy-vet.jsonc`. A plugin note never becomes an instruction.
 - Block only when a hard rule scores 0.8 or higher. If confidence is present and below 0.8, allow the write. For a choice, that is the probability of the chosen option.
+- For the test checks, a score from 0.5 up to a block, or a block score with confidence below 0.8, writes the file and adds a note in `tool.execute.after`. Below 0.5 says nothing. A block in the same write wins, and its notes are dropped.
+- The instruction check notes only at a block score. Its rules are already a guess, so from 0.5 up to that it says nothing.
 - Judge the new text, not the old file. For `edit`, that is `newString`. For a patch update, that is the added lines.
 - Old text may be used only as contrast evidence for the edit check and the instruction check: `oldString`, the removed lines of a patch, a deleted test file, or the file on disk before a `write`. Never send it with the new-test questions.
 - Strip code comments from old and new text before the edit check and the instruction check. Jev judges the code, not the explanation. For the instruction check, only strip files whose comment syntax is known. Prose like "don't" is not a quote.
@@ -39,9 +41,13 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The
 - Instruction files are the one thing read outside the project folder, and only at those paths. Cut each to 8,000 characters and all to 24,000.
 - Split instructions into sentences in code. Ask Jev once per sentence whether it is a rule, and cache the answer in memory. Do not cache a missing answer.
 - A later user message can lift an instruction. Order instructions oldest first, files before messages, and keep the newest when capping.
-- An edit block message names the file, the test, and the old and new check. It tells the agent to fix the code, or to stop and ask the user. It never suggests deleting the test.
+- A block or note names, per test: the file, the test, the rule with one plain line, the evidence, and the next step. Evidence is copied from the text, never made up: assertion or mock lines for a new test, and the old and new lines for an edit. List at most five tests.
+- A block message never suggests deleting a test or not adding it. It tells the agent it can ask the user to allow the change. An edit's next step is to fix the code, or to stop and ask the user if the old test is wrong.
+- The user can allow a block. Only real user messages in the top-level session, written after that block, count. One question per blocked test, and a score of 0.5 or higher allows it. If that request fails, the block stands, like any other missing answer.
+- The user-intent question and the allow question are not the same. User intent asks if the user asked for this edit, from recent messages, before any block. Allow asks if the user allowed a block, from messages after it, for new tests and edits. Both allow at 0.5 and log it. Do not add a third.
+- Count blocks per top-level session, file, and test. A pass or an allow starts over. At three in a row, the next step tells the agent to stop retrying and ask the user. Keep at most 100 blocks per session and 100 sessions, in memory only.
 - The setup and the code under test are context, not judged. Read them only from inside the project folder, never from `node_modules` or other test files. Tests use a fake disk.
-- Each question asks one thing, and yes means a problem. A question that needs the code under test is skipped when none was found. The exceptions are the user-intent question and the lifted-instruction question, where a score of 0.5 or higher allows the edit or drops the note, and the two sentence questions, where 0.5 or higher on "limits" and below 0.5 on "style" makes a rule.
+- Each question asks one thing, and yes means a problem. A question that needs the code under test is skipped when none was found. The exceptions are the user-intent, allow, and lifted-instruction questions, where a score of 0.5 or higher allows the edit or drops the note, and the two sentence questions, where 0.5 or higher on "limits" and below 0.5 on "style" makes a rule.
 - Use `jev-latest`. Do not pin a model version.
 - The first checks are tests, then instructions. Add later checks in `src/review.ts`. Do not rename the package for a new check.
 - The published npm name is `jevy-vet`. Do not rename it. Install steps are in `README.md`.

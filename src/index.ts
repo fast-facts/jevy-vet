@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { checkInstructions, review } from './review.ts';
+import { type Block, checkInstructions, review } from './review.ts';
 import { loadSettings } from './settings.ts';
 
 interface Input {
@@ -37,7 +37,7 @@ const KEEP_SESSIONS = 100;
 // Checks started before a tool runs and not yet collected after it. A failed tool never collects.
 const KEEP_PENDING = 50;
 
-// Blocks useless test writes, and notes edits that may break the user's instructions, by calling TypeSafe directly.
+// Blocks useless test writes, notes unsure ones and edits that may break the user's instructions, by calling TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
@@ -45,6 +45,10 @@ export default async function jevyVet(input: Input) {
   const worktree = input.worktree ?? root;
   // The user's latest messages per session, so a test change the user asked for is allowed.
   const messages = new Map<string, string[]>();
+  // How many real messages each session has had, so a block knows which messages came after it.
+  const counts = new Map<string, number>();
+  // Earlier blocks per top-level session, so the user can allow one and retry loops are noticed.
+  const blocks = new Map<string, Map<string, Block>>();
   // A subagent's prompt is written by the parent agent, not the user. It never counts as the user asking.
   // The parent is kept so a subagent's edits are still checked against the user's instructions.
   const parents = new Map<string, string>();
@@ -88,9 +92,13 @@ export default async function jevyVet(input: Input) {
       // Delete first so this session moves to the end.
       messages.delete(hook.sessionID);
       messages.set(hook.sessionID, kept);
+      counts.set(hook.sessionID, (counts.get(hook.sessionID) ?? 0) + 1);
       if (messages.size > KEEP_SESSIONS) {
         const oldest = messages.keys().next().value;
-        if (oldest !== undefined) messages.delete(oldest);
+        if (oldest !== undefined) {
+          messages.delete(oldest);
+          counts.delete(oldest);
+        }
       }
       return Promise.resolve();
     },
@@ -102,12 +110,6 @@ export default async function jevyVet(input: Input) {
         disk,
         log,
       };
-      const reason = await review(hook.tool, output.args, {
-        ...shared,
-        userMessages: parents.has(session) ? [] : messages.get(session) ?? [],
-      });
-      if (reason) throw new Error(reason);
-      if (!hook.callID) return;
       // The user of a subagent session is the user of the session that started it.
       let top = session;
       for (let hops = 0; hops < 10; hops += 1) {
@@ -115,6 +117,25 @@ export default async function jevyVet(input: Input) {
         if (parent === undefined) break;
         top = parent;
       }
+      // A block in a subagent is answered by the user in the top session, so blocks are kept there.
+      let sessionBlocks = blocks.get(top);
+      if (!sessionBlocks) {
+        sessionBlocks = new Map<string, Block>();
+        blocks.set(top, sessionBlocks);
+        if (blocks.size > KEEP_SESSIONS) {
+          const oldest = blocks.keys().next().value;
+          if (oldest !== undefined) blocks.delete(oldest);
+        }
+      }
+      const notes: string[] = [];
+      const reason = await review(hook.tool, output.args, {
+        ...shared,
+        userMessages: parents.has(session) ? [] : messages.get(session) ?? [],
+        history: { blocks: sessionBlocks, messages: messages.get(top) ?? [], messageCount: counts.get(top) ?? 0 },
+        warn: note => notes.push(note),
+      });
+      if (reason) throw new Error(reason);
+      if (!hook.callID) return;
       // Started now so it runs while the tool does. The after hook adds the note.
       const check = checkInstructions(hook.tool, output.args, {
         ...shared,
@@ -122,7 +143,10 @@ export default async function jevyVet(input: Input) {
         cache: sentences,
         instructionFiles: paths => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk),
       }).catch(() => undefined);
-      pending.set(hook.callID, check);
+      pending.set(hook.callID, check.then(instruction => {
+        const parts = instruction ? [...notes, instruction] : notes;
+        return parts.join('\n\n') || undefined;
+      }));
       if (pending.size > KEEP_PENDING) {
         const oldest = pending.keys().next().value;
         if (oldest !== undefined) pending.delete(oldest);

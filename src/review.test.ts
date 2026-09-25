@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { checkInstructions, type InstructionDeps, review, type ReviewDeps } from './review.ts';
+import { type Block, checkInstructions, type History, type InstructionDeps, review, type ReviewDeps } from './review.ts';
 import { type Settings } from './settings.ts';
 
 const USEFUL = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
@@ -165,7 +165,7 @@ describe('review', () => {
         t0_title_mismatch: { noul: 0.1 },
       },
     }))));
-    expect(result).toContain('src/foo.test.ts (test 1): It would still pass if the code returned null, an empty value, or zero.');
+    expect(result).toContain('- src/foo.test.ts, test 1\n  Passes on an empty result: It would still pass if the code returned null, an empty value, or zero.\n  evidence: expect(x).toBeDefined()\n  next: Compare the result with a specific expected value.');
     expect(result).not.toContain('title');
     expect(result).not.toContain('old');
   });
@@ -183,7 +183,9 @@ describe('review', () => {
     const result = await review('write', { filePath: 'foo_test.go', content: 'func TestGet(t *testing.T) {}' }, deps(() => Promise.resolve(jsonResponse({
       answers: { t0_title_mismatch: { noul: 0.8 } },
     }))));
-    expect(result).toContain('foo_test.go (test "TestGet"): Its title promises a behavior that none of its assertions check.');
+    expect(result).toContain('- foo_test.go, test "TestGet"\n  Title not checked: Its title promises a behavior that none of its assertions check.\n  next: ');
+    // No assertion in the test text, so no evidence line is made up.
+    expect(result).not.toContain('evidence:');
   });
 
   test('allows the write when TypeSafe fails', async () => {
@@ -334,9 +336,13 @@ describe('review', () => {
     expect(parsed.questions.t1_trivial_code.instructions).toContain('`files[0].cases[1].test`');
     expect(result).toBe([
       'Jevy blocked this test write.',
-      '/repo/src/math.test.ts (test "doubles"): The expected value is computed with the same logic as the code under test.',
-      'Rewrite the test so a wrong result would fail it, or do not add it.',
+      '- /repo/src/math.test.ts, test "doubles"',
+      '  Copied expectation: The expected value is computed with the same logic as the code under test.',
+      '  evidence: test(\'doubles\', () => { expect(twice(2)).toBe(4) })',
+      '  next: Use a literal or a worked example as the expected value.',
+      'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.',
     ].join('\n'));
+    expect(result).not.toMatch(/do not add|delete/i);
   });
 
   test('reads setup and imports from the file on disk for an edit, but judges only newString', async () => {
@@ -381,7 +387,7 @@ describe('review', () => {
     expect(bodies.every(body => body.state.files[0].code_under_test.length === 1)).toBe(true);
     expect(bodies[1].state.files[0].cases[0].id).toBe('t20');
     expect(bodies[1].questions.t20_title_mismatch.instructions).toContain('`files[0].cases[0].test`');
-    expect(result).toContain('/repo/f.test.ts (test "case 29"): It replaces the code it tests with a mock or stub.');
+    expect(result).toContain('- /repo/f.test.ts, test "case 29"\n  Mocks the code under test: It replaces the code it tests with a mock or stub.');
   });
 
   test('still blocks on one request when another request fails', async () => {
@@ -456,20 +462,22 @@ describe('review', () => {
       const result = await editRun(weaken, { e0_change: sure('weaker') }).result;
       expect(result).toBe([
         'Jevy blocked this test edit.',
-        '/repo/a.test.ts (test "adds"): The new check is weaker than the old one.',
+        '- /repo/a.test.ts, test "adds"',
+        '  Weaker check: The new check is weaker than the old one.',
         '  was: expect(add(1, 2)).toBe(3)',
         '  now: expect(add(1, 2)).toBeDefined()',
-        'Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.',
+        '  next: Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.',
+        'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.',
       ].join('\n'));
       expect(result).not.toMatch(/delete|remove the test/i);
     });
 
     test('blocks inverted or removed checks, changed values, and removed tests', async () => {
-      expect(await editRun(weaken, { e0_change: sure('inverted_or_removed') }).result).toContain('A check was inverted, removed, or disabled.');
-      expect(await editRun(weaken, { e0_change: sure('changed_value') }).result).toContain('The expected value changed.');
-      expect(await editRun(weaken, { e0_change: { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.92 } } }).result).toContain('The new check is weaker than the old one.');
+      expect(await editRun(weaken, { e0_change: sure('inverted_or_removed') }).result).toContain('Check removed: A check was inverted, removed, or disabled.');
+      expect(await editRun(weaken, { e0_change: sure('changed_value') }).result).toContain('Expected value changed: The test now expects a different result.');
+      expect(await editRun(weaken, { e0_change: { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.92 } } }).result).toContain('Weaker check: The new check is weaker than the old one.');
       const removed = await editRun({ filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: '' }, { e0_removes_test: { type: 'noul', noul: 0.9 } }).result;
-      expect(removed).toContain('It removes or disables a test without an equivalent replacement.');
+      expect(removed).toContain('Test removed: A test or assertion is gone and nothing checks the same behavior.');
       expect(removed).toContain('  now: (removed)');
     });
 
@@ -497,8 +505,8 @@ describe('review', () => {
 
     test('still blocks when the user did not ask for it', async () => {
       const run = editRun(weaken, { e0_change: sure('weaker'), e0_user_asked: { type: 'noul', noul: 0.2 } }, ['Make the tests pass.']);
-      expect(await run.result).toContain('The new check is weaker than the old one.');
-      expect(await editRun(weaken, { e0_change: sure('weaker'), e0_user_asked: { type: 'noul', noul: 0.49 } }, ['Make the tests pass.']).result).toContain('The new check is weaker than the old one.');
+      expect(await run.result).toContain('Weaker check: The new check is weaker than the old one.');
+      expect(await editRun(weaken, { e0_change: sure('weaker'), e0_user_asked: { type: 'noul', noul: 0.49 } }, ['Make the tests pass.']).result).toContain('Weaker check: The new check is weaker than the old one.');
     });
 
     test('compares a write with the file on disk', async () => {
@@ -506,15 +514,16 @@ describe('review', () => {
       const run = editRun({ filePath: '/repo/a.test.ts', content }, { e0_change: sure('changed_value') }, undefined, 'write');
       const result = await run.result;
       expect(run.edit().state.edits[0]?.old).toContain('toBe(3)');
-      expect(result).toContain('/repo/a.test.ts (test "adds"): The expected value changed.');
+      expect(result).toContain('- /repo/a.test.ts, test "adds"\n  Expected value changed: The test now expects a different result.');
       expect(result).toContain('  was: expect(add(1, 2)).toBe(3)');
       expect(result).toContain('  now: expect(add(1, 2)).toBe(4)');
     });
 
     test('names both checks when a new test and an edit both fail', async () => {
       const result = await editRun(weaken, { e0_change: sure('weaker'), t0_passes_on_empty: { noul: 0.95 } }).result;
-      expect(result).toContain('Jevy blocked this test write.');
-      expect(result).toContain('Jevy blocked this test edit.');
+      expect(result).toContain('Jevy blocked this test write and edit.');
+      expect(result).toContain('Passes on an empty result');
+      expect(result).toContain('Weaker check');
     });
 
     test('allows the edit when TypeSafe fails, and logs once', async () => {
@@ -733,5 +742,162 @@ describe('instruction check', () => {
     const note = await checkInstructions('edit', edit, instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': many } }));
     expect(note?.split('\n').filter(line => line.startsWith('- '))).toHaveLength(6);
     expect(note).toContain('- and 3 more');
+  });
+});
+
+describe('unsure tests, user allows, and retry loops', () => {
+  const WEAK = 'test(\'adds\', () => {\n  // checks the sum\n  expect(add(1, 2)).toBeDefined()\n})';
+
+  interface Body {
+    state: { blocks?: { path: string; test: string; block: string; user_messages: string[] }[] };
+    questions: Record<string, { type: string; instructions: string; criteria: { true: string; false: string } }>;
+  }
+
+  // Answers by question id. Records every body so a test can see what was asked.
+  function run(answers: Record<string, unknown>, options: { history?: History; tool?: string; args?: unknown; userMessages?: string[] } = {}) {
+    const bodies: Body[] = [];
+    const notes: string[] = [];
+    const used = deps((_url, init) => {
+      bodies.push(JSON.parse(String(init.body)) as Body);
+      return Promise.resolve(jsonResponse({ answers }));
+    }, { key: 'ts_secret' }, memoryDisk({ '/repo/a.test.ts': 'test(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})' }).disk);
+    used.history = options.history;
+    used.userMessages = options.userMessages;
+    used.warn = note => notes.push(note);
+    const result = review(options.tool ?? 'write', options.args ?? { filePath: 'src/a.test.ts', content: WEAK }, used);
+    return { result, bodies, notes, used };
+  }
+
+  function history(blocks: [string, Block][] = [], messages: string[] = [], messageCount = messages.length): History {
+    return { blocks: new Map(blocks), messages, messageCount };
+  }
+
+  test('adds a note, not a block, for a score from 0.5 up to sure', async () => {
+    const unsure = run({ t0_passes_on_empty: { type: 'noul', noul: 0.6 } });
+    expect(await unsure.result).toBeUndefined();
+    expect(unsure.notes).toEqual([[
+      'Jevy note: this test change was made, but it may be weak. Jev was not sure enough to block it.',
+      '- src/a.test.ts, test "adds"',
+      '  Passes on an empty result: It would still pass if the code returned null, an empty value, or zero.',
+      '  evidence: expect(add(1, 2)).toBeDefined()',
+      '  next: Compare the result with a specific expected value.',
+      'Check it, and fix it if the note is right.',
+    ].join('\n')]);
+    const lowConfidence = run({ t0_passes_on_empty: { type: 'noul', noul: 0.95, confidence: 0.6 } });
+    expect(await lowConfidence.result).toBeUndefined();
+    expect(lowConfidence.notes).toHaveLength(1);
+    const low = run({ t0_passes_on_empty: { type: 'noul', noul: 0.49 } });
+    expect(await low.result).toBeUndefined();
+    expect(low.notes).toEqual([]);
+  });
+
+  test('a block wins over a note, and lists only the sure rule', async () => {
+    const both = run({ t0_passes_on_empty: { type: 'noul', noul: 0.9 }, t0_title_mismatch: { type: 'noul', noul: 0.6 } });
+    const result = await both.result;
+    expect(result).toContain('Passes on an empty result');
+    expect(result).not.toContain('Title not checked');
+    expect(both.notes).toEqual([]);
+  });
+
+  test('adds a note for an unsure edit, unless the user asked for it', async () => {
+    const edit = { filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: 'expect(add(1, 2)).toBeGreaterThan(0)' };
+    const weaker = { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.65, equivalent: 0.35 }, confidence: 0.9 };
+    const unsure = run({ e0_change: weaker }, { tool: 'edit', args: edit });
+    expect(await unsure.result).toBeUndefined();
+    expect(unsure.notes[0]).toContain('Weaker check: The new check is weaker than the old one.\n  was: expect(add(1, 2)).toBe(3)\n  now: expect(add(1, 2)).toBeGreaterThan(0)');
+    const asked = run({ e0_change: weaker, e0_user_asked: { type: 'noul', noul: 0.7 } }, { tool: 'edit', args: edit, userMessages: ['Loosen the add check.'] });
+    expect(await asked.result).toBeUndefined();
+    expect(asked.notes).toEqual([]);
+  });
+
+  test('lists at most five tests', async () => {
+    const content = Array.from({ length: 7 }, (_, n) => `test('case ${n}', () => { expect(f(${n})).toBeDefined() })`).join('\n');
+    const answers: Record<string, unknown> = {};
+    for (let n = 0; n < 7; n += 1) answers[`t${n}_passes_on_empty`] = { type: 'noul', noul: 0.9 };
+    const result = await run(answers, { args: { filePath: 'src/a.test.ts', content } }).result;
+    expect(result?.split('\n').filter(line => line.startsWith('- '))).toHaveLength(6);
+    expect(result).toContain('- and 2 more');
+  });
+
+  test('remembers a block with the messages seen so far, and counts blocks in a row', async () => {
+    const h = history([], ['Write tests for add.'], 1);
+    const bad = { t0_passes_on_empty: { type: 'noul', noul: 0.9 } };
+    const first = await run(bad, { history: h }).result;
+    expect(first).toContain('If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.');
+    const block = h.blocks.get('src/a.test.ts\ntest "adds"');
+    expect(block?.count).toBe(1);
+    expect(block?.atMessage).toBe(1);
+    expect(block?.message).toContain('Passes on an empty result');
+    await run(bad, { history: h }).result;
+    const third = await run(bad, { history: h }).result;
+    expect(third).toContain('  next: This test was blocked 3 times in a row. Stop retrying it. Ask the user how to go on, or ask them to allow it.');
+    expect(third).toContain('If the user allows it, write it again and it will go through.');
+    expect(third).not.toContain('Compare the result with a specific expected value.');
+    // A write that passes starts the count over.
+    await run({}, { history: h }).result;
+    expect(h.blocks.size).toBe(0);
+  });
+
+  test('asks whether the user allowed a blocked test, with only the messages after the block', async () => {
+    const earlier: Block = { message: '- src/a.test.ts, test "adds"\n  Passes on an empty result: ...', count: 1, atMessage: 1 };
+    const h = history([['src/a.test.ts\ntest "adds"', earlier]], ['Write tests for add.', 'That test is fine, allow it.'], 2);
+    const allowed = run({ t0_passes_on_empty: { type: 'noul', noul: 0.95 }, o0_user_allows: { type: 'noul', noul: 0.9 } }, { history: h });
+    expect(await allowed.result).toBeUndefined();
+    const override = allowed.bodies.find(body => body.state.blocks);
+    expect(override?.state.blocks).toEqual([{ path: 'src/a.test.ts', test: 'test "adds"', block: earlier.message, user_messages: ['That test is fine, allow it.'] }]);
+    expect(override?.questions.o0_user_allows?.instructions).toBe('Does the user\'s latest message in `blocks[0].user_messages` ask to allow the change Jevy blocked in `blocks[0].block`?');
+    expect(allowed.used.logs).toEqual(['src/a.test.ts: the user allowed the blocked change to test "adds". The write was allowed.']);
+    expect(allowed.notes).toEqual([]);
+    expect(h.blocks.size).toBe(0);
+  });
+
+  test('still blocks when the user did not allow it, and moves the block to the latest message', async () => {
+    const earlier: Block = { message: 'blocked', count: 1, atMessage: 0 };
+    const h = history([['src/a.test.ts\ntest "adds"', earlier]], ['Keep going.'], 1);
+    const kept = run({ t0_passes_on_empty: { type: 'noul', noul: 0.95 }, o0_user_allows: { type: 'noul', noul: 0.3 } }, { history: h });
+    expect(await kept.result).toContain('Jevy blocked this test write.');
+    expect(h.blocks.get('src/a.test.ts\ntest "adds"')).toMatchObject({ count: 2, atMessage: 1 });
+  });
+
+  test('does not ask without a message after the block, or without an earlier block', async () => {
+    const earlier: Block = { message: 'blocked', count: 1, atMessage: 1 };
+    const noNewMessage = run({}, { history: history([['src/a.test.ts\ntest "adds"', earlier]], ['Allow it.'], 1) });
+    await noNewMessage.result;
+    expect(noNewMessage.bodies.some(body => body.state.blocks)).toBe(false);
+    const noBlock = run({}, { history: history([], ['Allow it.'], 1) });
+    await noBlock.result;
+    expect(noBlock.bodies.some(body => body.state.blocks)).toBe(false);
+  });
+
+  test('allows an edit the user allowed after it was blocked', async () => {
+    const edit = { filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: 'expect(add(1, 2)).toBe(4)' };
+    const changed = { type: 'choice', choice: 'changed_value', probabilities: { changed_value: 0.95 }, confidence: 0.95 };
+    const earlier: Block = { message: 'blocked', count: 2, atMessage: 0 };
+    const h = history([['/repo/a.test.ts\ntest "adds"', earlier]], ['Yes, 1 + 2 should be 4 now. Allow it.'], 1);
+    const allowed = run({ e0_change: changed, e0_user_asked: { type: 'noul', noul: 0.1 }, o0_user_allows: { type: 'noul', noul: 0.5 } }, { tool: 'edit', args: edit, history: h });
+    expect(await allowed.result).toBeUndefined();
+    expect(h.blocks.size).toBe(0);
+  });
+
+  test('keeps at most 100 blocks', async () => {
+    const old: [string, Block][] = Array.from({ length: 100 }, (_, n) => [`old${n}.test.ts\ntest 1`, { message: 'x', count: 1, atMessage: 0 }]);
+    const h = history(old);
+    await run({ t0_passes_on_empty: { type: 'noul', noul: 0.9 } }, { history: h }).result;
+    expect(h.blocks.size).toBe(100);
+    expect(h.blocks.has('old0.test.ts\ntest 1')).toBe(false);
+    expect(h.blocks.has('src/a.test.ts\ntest "adds"')).toBe(true);
+  });
+
+  test('an override request that fails still blocks', async () => {
+    const earlier: Block = { message: 'blocked', count: 1, atMessage: 0 };
+    const h = history([['src/a.test.ts\ntest "adds"', earlier]], ['Allow it.'], 1);
+    const used = deps((_url, init) => {
+      const body = String(init.body);
+      if (body.includes('"blocks"')) return Promise.reject(new Error('offline'));
+      return Promise.resolve(jsonResponse({ answers: { t0_passes_on_empty: { type: 'noul', noul: 0.9 } } }));
+    });
+    used.history = h;
+    expect(await review('write', { filePath: 'src/a.test.ts', content: WEAK }, used)).toContain('Jevy blocked this test write.');
+    expect(used.logs).toEqual(['TypeSafe request failed. The test write was allowed.']);
   });
 });

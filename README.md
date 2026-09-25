@@ -86,13 +86,23 @@ These are allowed:
 - The same check, written a different way.
 - A change that does not touch the check.
 
-The message names the file and the test, and shows the lines that changed. It tells the agent to fix the code, or to stop and ask you if the old test is wrong. It will not suggest deleting the test.
+The message shows the lines that changed. It tells the agent to fix the code, or to stop and ask you if the old test is wrong.
 
 ### When you asked for the change
 
 Your own words allow the edit. The plugin keeps your last three messages for that session, in memory only, and sends them with the edit so Jev can tell.
 
 Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
+
+## What the agent sees
+
+A block message lists each test: the file, the test, the rule it broke in one plain line, the lines that show it, and what to do next. Only lines that are really in the test are shown. At most five tests are listed. It never tells the agent to delete a test or to leave it out.
+
+It also tells the agent it can ask you. If you allow the change in a later message, the next try goes through. Only your messages after the block count, and a subagent's block is answered in the session you talk to.
+
+After three blocks in a row on the same test, the message tells the agent to stop retrying and ask you. A test that passes starts the count over.
+
+When Jev leans toward a problem but is not sure, the test is written and the same list is added to what the tool returns, as a note.
 
 ## Your instructions
 
@@ -112,6 +122,8 @@ Rules that are only about formatting are left out. With no key, or when TypeSafe
 ## If Jev cannot decide
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
+
+For the test checks, a score from 0.5 up to sure adds a note instead. The instruction check adds a note only when Jev is sure.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes are not.
 

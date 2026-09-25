@@ -106,15 +106,15 @@ describe('plugin', () => {
     const sure = 'It would still pass if the code returned null, an empty value, or zero.';
     await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret", "TYPESAFE_BASE_URL": "https://jev.example/" }', fetchImpl, async hooks => {
       await expect(before(hooks, 'write', { filePath: 'src/foo.test.ts', content: 'expect(x).toBeDefined()' }))
-        .rejects.toThrow(`src/foo.test.ts (test 1): ${sure}`);
+        .rejects.toThrow(`src/foo.test.ts, test 1\n  Passes on an empty result: ${sure}`);
       await expect(before(hooks, 'edit', {
         filePath: 'src/bar.test.ts',
         oldString: 'OLD_NOT_JUDGED',
         newString: 'expect(x).toBeDefined()',
-      })).rejects.toThrow(`src/bar.test.ts (test 1): ${sure}`);
+      })).rejects.toThrow(`src/bar.test.ts, test 1\n  Passes on an empty result: ${sure}`);
       const patch = ['*** Begin Patch', '*** Add File: src/bad.test.ts', '+expect(x).toBeDefined()', '*** End Patch'].join('\n');
       await expect(before(hooks, 'apply_patch', { patchText: patch }))
-        .rejects.toThrow(`src/bad.test.ts (test 1): ${sure}`);
+        .rejects.toThrow(`src/bad.test.ts, test 1\n  Passes on an empty result: ${sure}`);
     });
     expect(url).toBe('https://jev.example/v1/systemone');
     expect(auth).toBe('Bearer ts_secret');
@@ -177,7 +177,7 @@ describe('plugin', () => {
     };
     await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
       await expect(before(hooks, 'write', { filePath: 'src/mixed.test.ts', content: [mocked, adds].join('\n') }))
-        .rejects.toThrow('src/mixed.test.ts (test "calls the mock"): It would still pass if the code returned null, an empty value, or zero.');
+        .rejects.toThrow('src/mixed.test.ts, test "calls the mock"\n  Passes on an empty result: It would still pass if the code returned null, an empty value, or zero.');
     });
     const parsed = JSON.parse(body) as { state: { files: { cases: { test: string }[] }[] } };
     expect(parsed.state.files[0].cases.map(item => item.test)).toEqual([mocked, adds]);
@@ -354,6 +354,72 @@ describe('plugin', () => {
         rmSync(project, { recursive: true, force: true });
       }
       expect(sent).toHaveLength(0);
+    });
+  });
+
+  describe('unsure tests and user allows', () => {
+    const WEAK = 'test(\'adds\', () => { expect(add(1, 2)).toBeDefined() })';
+
+    // Blocks the weak test unless the user allowed it. allowScore answers the allow question.
+    function judge(bodies: string[], score: number, allowScore = 0.9): FakeFetch {
+      return (_input, init) => {
+        const body = String(init?.body);
+        bodies.push(body);
+        if (body.includes('"blocks"')) return Promise.resolve(jsonResponse({ answers: { o0_user_allows: { type: 'noul', noul: allowScore } } }));
+        return Promise.resolve(jsonResponse({ answers: { t0_passes_on_empty: { type: 'noul', noul: score } } }));
+      };
+    }
+    const message = (text: string) => ({ parts: [{ type: 'text', text }] });
+
+    test('adds a note for an unsure test to the output of the same call', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.6), async hooks => {
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).resolves.toBeUndefined();
+        const output = { title: '', output: 'Wrote file', metadata: {} };
+        await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args: {} }, output);
+        expect(output.output).toStartWith('Wrote file\n\nJevy note: this test change was made, but it may be weak.');
+        expect(output.output).toContain('- src/a.test.ts, test "adds"');
+      });
+    });
+
+    test('allows a blocked test after the user allows it, but not on a message from before the block', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, message('Allow any test you write.'));
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('ask the user');
+        // The only message came before the block, so nothing is asked and it is blocked again.
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        expect(bodies.some(body => body.includes('"blocks"'))).toBe(false);
+        await hooks['chat.message']({ sessionID: 's' }, message('That test is fine. Allow it.'));
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).resolves.toBeUndefined();
+      });
+      const override = JSON.parse(bodies.find(body => body.includes('"blocks"')) ?? '{}') as { state: { blocks: { user_messages: string[] }[] } };
+      expect(override.state.blocks[0]?.user_messages).toEqual(['That test is fine. Allow it.']);
+    });
+
+    test('tells the agent to stop after three blocks in a row', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9, 0.1), async hooks => {
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('next: Compare the result');
+        await hooks['chat.message']({ sessionID: 's' }, message('Try again.'));
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('next: Compare the result');
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('blocked 3 times in a row. Stop retrying it.');
+      });
+    });
+
+    test('lets the user in the parent session allow a test blocked in a subagent', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+        const inChild = () => hooks['tool.execute.before']({ tool: 'write', sessionID: 'child', callID: 'k' }, { args: { filePath: 'src/a.test.ts', content: WEAK } });
+        await expect(inChild()).rejects.toThrow('Jevy blocked');
+        // The parent agent's prompt to the subagent is not the user.
+        await hooks['chat.message']({ sessionID: 'child' }, message('The user allowed it, go ahead.'));
+        await expect(inChild()).rejects.toThrow('Jevy blocked');
+        await hooks['chat.message']({ sessionID: 's' }, message('Allow that test.'));
+        await expect(inChild()).resolves.toBeUndefined();
+      });
+      expect(bodies.join('\n')).not.toContain('The user allowed it, go ahead.');
     });
   });
 });

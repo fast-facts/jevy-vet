@@ -19,24 +19,39 @@ interface Ref {
 
 interface Claim {
   id: string;
+  // A short name, then one plain line on what is wrong, then what to do instead.
+  name: string;
   fail: string;
+  next: string;
+  // Which lines of the test to show as evidence.
+  shows: RegExp;
   // Needs the code under test. Skipped when none was found, not asked blind.
   needsCode: boolean;
   ask: (ref: Ref) => string;
   criteria?: { true: string; false: string };
 }
 
+// Lines that look like an assertion or a mock. Only shown when they are really in the test.
+const ASSERTION = /\b(?:expect|assert\w*|should|t\.(?:is|equal|deepEqual|ok|true|false|throws)|require\.\w+|XCTAssert\w*)\b/;
+const MOCK = /mock|stub|spy|sinon|@patch|monkeypatch/i;
+
 // One condition per question. Yes always means a problem.
 const CLAIMS: readonly Claim[] = [
   {
     id: 'title_mismatch',
+    name: 'Title not checked',
     fail: 'Its title promises a behavior that none of its assertions check.',
+    next: 'Add an assertion for what the title promises, or rename the test to what it checks.',
+    shows: ASSERTION,
     needsCode: false,
     ask: ref => `Does the title of the test in ${ref.test} promise a behavior that none of its assertions check? Helpers it calls may be in ${ref.setup}.`,
   },
   {
     id: 'passes_on_empty',
+    name: 'Passes on an empty result',
     fail: 'It would still pass if the code returned null, an empty value, or zero.',
+    next: 'Compare the result with a specific expected value.',
+    shows: ASSERTION,
     needsCode: false,
     ask: ref => `Would the test in ${ref.test} still pass if the code it tests returned null, an empty value, or zero instead of the correct result? Helpers it calls may be in ${ref.setup}.`,
     criteria: {
@@ -46,7 +61,10 @@ const CLAIMS: readonly Claim[] = [
   },
   {
     id: 'copied_expectation',
+    name: 'Copied expectation',
     fail: 'The expected value is computed with the same logic as the code under test.',
+    next: 'Use a literal or a worked example as the expected value.',
+    shows: ASSERTION,
     needsCode: true,
     ask: ref => `Is the expected value in the test in ${ref.test} computed with the same logic as the code in ${ref.code}?`,
     criteria: {
@@ -56,7 +74,10 @@ const CLAIMS: readonly Claim[] = [
   },
   {
     id: 'mocks_code_under_test',
+    name: 'Mocks the code under test',
     fail: 'It replaces the code it tests with a mock or stub.',
+    next: 'Call the real function, and mock only what it depends on.',
+    shows: MOCK,
     needsCode: true,
     ask: ref => `Does the test in ${ref.test} replace the function it is testing, shown in ${ref.code}, with a mock or stub?`,
     criteria: {
@@ -66,7 +87,10 @@ const CLAIMS: readonly Claim[] = [
   },
   {
     id: 'trivial_code',
+    name: 'Trivial code',
     fail: 'The code it tests is only a getter, a setter, or a constructor that stores fields.',
+    next: 'Test the behavior that uses these fields, through the code that calls them.',
+    shows: ASSERTION,
     needsCode: true,
     ask: ref => `Is the code in ${ref.code} that the test in ${ref.test} exercises only a getter, a setter, or a constructor that stores fields?`,
   },
@@ -84,10 +108,12 @@ const CHANGES: Record<string, string> = {
 
 // These block. stronger, equivalent, and unrelated do not.
 const BAD_CHANGES: Record<string, string> = {
-  weaker: 'The new check is weaker than the old one.',
-  inverted_or_removed: 'A check was inverted, removed, or disabled.',
-  changed_value: 'The expected value changed.',
+  weaker: 'Weaker check: The new check is weaker than the old one.',
+  inverted_or_removed: 'Check removed: A check was inverted, removed, or disabled.',
+  changed_value: 'Expected value changed: The test now expects a different result.',
 };
+const REMOVED_TEST = 'Test removed: A test or assertion is gone and nothing checks the same behavior.';
+const FIX_CODE = 'Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.';
 
 export interface ReviewDeps {
   load: () => Settings;
@@ -97,11 +123,55 @@ export interface ReviewDeps {
   disk?: Disk;
   // The user's latest messages in this session, oldest first. Empty when unknown.
   userMessages?: string[];
+  // Earlier blocks, so the user can allow one and a retry loop is noticed.
+  history?: History;
+  // Receives a note for tests Jev is unsure about. The plugin adds it to the tool output.
+  warn?: (note: string) => void;
+}
+
+// What the plugin remembers for the session the user talks to. A subagent shares its parent's.
+export interface History {
+  // By file and test. Deleted when that test passes or the user allows it.
+  blocks: Map<string, Block>;
+  // The user's latest real messages, oldest first, and how many there have been in all.
+  messages: string[];
+  messageCount: number;
+}
+
+export interface Block {
+  // The part of the block message for this test, shown to Jev when the user may have allowed it.
+  message: string;
+  // Blocks in a row for this test.
+  count: number;
+  // messageCount when it was blocked. Only later messages can allow it.
+  atMessage: number;
+}
+
+interface Finding {
+  kind: 'write' | 'edit';
+  key: string;
+  path: string;
+  test: string;
+  block: boolean;
+  fails: string[];
+  evidence: string[];
+  next: string;
+}
+
+interface OverrideRequest {
+  state: {
+    purpose: string;
+    blocks: { path: string; test: string; block: string; user_messages: string[] }[];
+  };
+  questions: Record<string, Question>;
 }
 
 interface Case {
   id: string;
   title?: string;
+  name: string;
+  // File and test name, so a later allow matches this test.
+  key: string;
   test: string;
   truncated: boolean;
 }
@@ -154,11 +224,16 @@ interface EditRequest {
 
 interface Edit extends EditPair {
   id: string;
+  name: string;
+  key: string;
 }
 
 export async function review(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
   const files = testFilesFrom(tool, args);
-  const edits: Edit[] = editsFrom(tool, args, reader(deps.disk)).map((pair, n) => ({ ...pair, id: `e${n}` }));
+  const edits: Edit[] = editsFrom(tool, args, reader(deps.disk)).map((pair, n) => {
+    const name = testName(pair.title, 'an edited test');
+    return { ...pair, id: `e${n}`, name, key: `${pair.path}\n${name}` };
+  });
   if (files.length === 0 && edits.length === 0) return;
 
   const names = [...new Set([...files, ...edits].map(item => item.path))].join(', ');
@@ -169,12 +244,85 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
   const once = logOnce(deps);
   const prepared = prepare(files, deps.disk);
   const userMessages = deps.userMessages ?? [];
-  const all = [...batches(prepared), ...editBatches(edits, userMessages)];
+  const blockKeys = [...prepared.flatMap(item => item.cases.map(test => test.key)), ...edits.map(edit => edit.key)];
+  // Asked with the checks, not after them, so an allowed retry costs no extra wait.
+  const override = overrideRequest([...new Set(blockKeys)], deps.history);
+  const all = [...batches(prepared), ...editBatches(edits, userMessages), ...(override ? [override.request] : [])];
   const results = await Promise.all(all.map(batch => callTypeSafe(once, settings, batch, 'The test write was allowed.')));
   const answers: Record<string, unknown> = {};
   for (const result of results) if (result) Object.assign(answers, result);
-  const messages = [blockMessage(prepared, answers), editBlockMessage(edits, answers, once)].filter(message => message !== undefined);
-  return messages.length === 0 ? undefined : messages.join('\n\n');
+
+  const findings = [...testFindings(prepared, answers), ...editFindings(edits, answers, once)];
+  const blocked: Finding[] = [];
+  for (const finding of findings.filter(item => item.block)) {
+    const id = override?.ids.get(finding.key);
+    const allowed = id === undefined ? undefined : noulScore(answers[id]);
+    // 0.5 or higher allows it, the same as the user-intent question. A missing answer does not.
+    if (allowed !== undefined && allowed >= 0.5) {
+      once.log?.(`${finding.path}: the user allowed the blocked change to ${finding.test}. The write was allowed.`);
+      continue;
+    }
+    blocked.push(finding);
+  }
+  const history = deps.history;
+  if (history) {
+    const blockedKeys = new Set(blocked.map(item => item.key));
+    // A test that passes, or that the user allowed, starts over.
+    for (const key of blockKeys) if (!blockedKeys.has(key)) history.blocks.delete(key);
+    for (const finding of blocked) {
+      const count = (history.blocks.get(finding.key)?.count ?? 0) + 1;
+      // Delete first so this test moves to the end.
+      history.blocks.delete(finding.key);
+      history.blocks.set(finding.key, { message: headTail(findingLines(finding).join('\n'), 1000).text, count, atMessage: history.messageCount });
+    }
+    while (history.blocks.size > KEEP_BLOCKS) {
+      const oldest = history.blocks.keys().next().value;
+      if (oldest === undefined) break;
+      history.blocks.delete(oldest);
+    }
+  }
+  if (blocked.length > 0) return blockText(blocked, history);
+  const unsure = findings.filter(item => !item.block);
+  if (unsure.length > 0) deps.warn?.(noteText(unsure));
+  return;
+}
+
+const UNSURE = 0.5;
+const LOOP_BLOCKS = 3;
+const KEEP_BLOCKS = 100;
+const MAX_LISTED = 5;
+
+// One question per earlier block the user has written since. Nothing to ask without both.
+function overrideRequest(keys: string[], history: History | undefined): { ids: Map<string, string>; request: OverrideRequest } | undefined {
+  if (!history) return;
+  const ids = new Map<string, string>();
+  const request: OverrideRequest = {
+    state: {
+      purpose: 'Jevy blocked a change to a test, and the agent was told it may ask the user to allow it. Decide whether the user has allowed each blocked change. `block` is what Jevy told the agent. `user_messages` are only the user\'s messages written after that block, oldest first.',
+      blocks: [],
+    },
+    questions: {},
+  };
+  for (const key of keys) {
+    const block = history.blocks.get(key);
+    if (!block) continue;
+    const since = Math.min(history.messages.length, history.messageCount - block.atMessage);
+    if (since <= 0) continue;
+    const n = ids.size;
+    const id = `o${n}_user_allows`;
+    ids.set(key, id);
+    const [path = '', test = ''] = key.split('\n');
+    request.state.blocks.push({ path, test, block: block.message, user_messages: history.messages.slice(-since) });
+    request.questions[id] = {
+      type: 'noul',
+      instructions: `Does the user's latest message in \`blocks[${n}].user_messages\` ask to allow the change Jevy blocked in \`blocks[${n}].block\`?`,
+      criteria: {
+        true: 'The user tells the agent to go ahead with this change, to allow it or keep it, or says Jevy is wrong about this test.',
+        false: 'The user does not mention it, asks for something else, or agrees with Jevy.',
+      },
+    };
+  }
+  return ids.size === 0 ? undefined : { ids, request };
 }
 
 function prepare(files: TestFile[], disk: Disk | undefined): Prepared[] {
@@ -182,9 +330,11 @@ function prepare(files: TestFile[], disk: Disk | undefined): Prepared[] {
   return files.map(file => ({
     file,
     context: contextFor(file, disk),
-    cases: file.cases.map(text => {
+    cases: file.cases.map((text, n) => {
       const cut = headTail(text, MAX_CASE_CHARS);
-      return { id: `t${index++}`, title: titleOf(text), test: cut.text, truncated: cut.truncated };
+      const title = titleOf(text);
+      const name = testName(title, `test ${n + 1}`);
+      return { id: `t${index++}`, title, name, key: `${file.path}\n${name}`, test: cut.text, truncated: cut.truncated };
     }),
   }));
 }
@@ -338,7 +488,7 @@ function reader(disk: Disk | undefined): (path: string) => string | undefined {
 async function callTypeSafe(
   deps: ReviewDeps,
   settings: Settings,
-  batch: Batch | EditRequest | SentenceRequest | RuleRequest,
+  batch: Batch | EditRequest | OverrideRequest | SentenceRequest | RuleRequest,
   allowed: string,
 ): Promise<Record<string, unknown> | undefined> {
   const key = settings.key.trim();
@@ -381,44 +531,106 @@ async function callTypeSafe(
   return body.answers;
 }
 
-function blockMessage(prepared: Prepared[], answers: Record<string, unknown>): string | undefined {
-  const blocked: string[] = [];
+function testFindings(prepared: Prepared[], answers: Record<string, unknown>): Finding[] {
+  const findings: Finding[] = [];
   for (const item of prepared) {
-    for (const [n, test] of item.cases.entries()) {
-      const fails = CLAIMS.filter(claim => noulIsSure(answers[`${test.id}_${claim.id}`])).map(claim => claim.fail);
-      if (fails.length === 0) continue;
-      const name = test.title ? `test "${test.title}"` : `test ${n + 1}`;
-      blocked.push(`${item.file.path} (${name}): ${fails.join(' ')}`);
+    for (const test of item.cases) {
+      const sure: Claim[] = [];
+      const unsure: Claim[] = [];
+      for (const claim of CLAIMS) {
+        const level = noulLevel(answers[`${test.id}_${claim.id}`]);
+        if (level === 'block') sure.push(claim);
+        else if (level === 'warn') unsure.push(claim);
+      }
+      const claims = sure.length > 0 ? sure : unsure;
+      if (claims.length === 0) continue;
+      const code = stripComments(test.test, item.file.path).split('\n').map(line => line.trim());
+      const shown = code.filter(line => line !== '' && claims.some(claim => claim.shows.test(line)));
+      findings.push({
+        kind: 'write',
+        key: test.key,
+        path: item.file.path,
+        test: test.name,
+        block: sure.length > 0,
+        fails: claims.map(claim => `${claim.name}: ${claim.fail}`),
+        evidence: shown.slice(0, 2).map(line => `  evidence: ${cut(line)}`),
+        next: [...new Set(claims.map(claim => claim.next))].join(' '),
+      });
     }
   }
-  if (blocked.length === 0) return;
-  return ['Jevy blocked this test write.', ...blocked, 'Rewrite the test so a wrong result would fail it, or do not add it.'].join('\n');
+  return findings;
 }
 
-function editBlockMessage(edits: Edit[], answers: Record<string, unknown>, deps: ReviewDeps): string | undefined {
-  const blocked: string[] = [];
+function editFindings(edits: Edit[], answers: Record<string, unknown>, deps: ReviewDeps): Finding[] {
+  const findings: Finding[] = [];
   for (const edit of edits) {
-    const fails: string[] = [];
+    const sure: string[] = [];
+    const unsure: string[] = [];
+    const add = (level: Level, fail: string) => {
+      if (level === 'block') sure.push(fail);
+      else if (level === 'warn') unsure.push(fail);
+    };
     const change = answers[`${edit.id}_change`];
-    if (isRecord(change) && typeof change.choice === 'string' && change.choice in BAD_CHANGES && choiceIsSure(change)) {
-      fails.push(BAD_CHANGES[change.choice]);
-    }
-    if (noulIsSure(answers[`${edit.id}_removes_test`])) fails.push('It removes or disables a test without an equivalent replacement.');
-    if (fails.length === 0) continue;
-    // Unsure counts as asked, the same way unsure allows everywhere else.
+    if (isRecord(change) && typeof change.choice === 'string' && change.choice in BAD_CHANGES) add(choiceLevel(change), BAD_CHANGES[change.choice]);
+    add(noulLevel(answers[`${edit.id}_removes_test`]), REMOVED_TEST);
+    if (sure.length === 0 && unsure.length === 0) continue;
     const asked = noulScore(answers[`${edit.id}_user_asked`]);
     if (asked !== undefined && asked >= 0.5) {
       deps.log?.(`${edit.path}: the user asked for this test change. The edit was allowed.`);
       continue;
     }
-    const name = edit.title ? ` (test "${edit.title}")` : '';
-    blocked.push([`${edit.path}${name}: ${[...new Set(fails)].join(' ')}`, ...evidence(edit)].join('\n'));
+    findings.push({
+      kind: 'edit',
+      key: edit.key,
+      path: edit.path,
+      test: edit.name,
+      block: sure.length > 0,
+      fails: [...new Set(sure.length > 0 ? sure : unsure)],
+      evidence: evidence(edit),
+      next: FIX_CODE,
+    });
   }
-  if (blocked.length === 0) return;
+  return findings;
+}
+
+function testName(title: string | undefined, fallback: string): string {
+  return title ? `test "${title}"` : fallback;
+}
+
+function findingLines(finding: Finding, next = finding.next): string[] {
+  return [`- ${finding.path}, ${finding.test}`, ...finding.fails.map(fail => `  ${fail}`), ...finding.evidence, `  next: ${next}`];
+}
+
+function listed(findings: Finding[], next: (finding: Finding) => string): string[] {
+  const lines = findings.slice(0, MAX_LISTED).flatMap(finding => findingLines(finding, next(finding)));
+  if (findings.length > MAX_LISTED) lines.push(`- and ${findings.length - MAX_LISTED} more`);
+  return lines;
+}
+
+function blockText(blocked: Finding[], history: History | undefined): string {
+  const countOf = (item: Finding) => history?.blocks.get(item.key)?.count ?? 0;
+  const kinds = new Set(blocked.map(item => item.kind));
+  let what = 'test write';
+  if (kinds.size > 1) what = 'test write and edit';
+  else if (kinds.has('edit')) what = 'test edit';
+  const looping = blocked.some(item => countOf(item) >= LOOP_BLOCKS);
+  const ask = looping ? 'If the user allows it, write it again and it will go through.' : 'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.';
   return [
-    'Jevy blocked this test edit.',
-    ...blocked,
-    'Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.',
+    `Jevy blocked this ${what}.`,
+    ...listed(blocked, item => {
+      const count = countOf(item);
+      if (count >= LOOP_BLOCKS) return `This test was blocked ${count} times in a row. Stop retrying it. Ask the user how to go on, or ask them to allow it.`;
+      return item.next;
+    }),
+    ask,
+  ].join('\n');
+}
+
+function noteText(unsure: Finding[]): string {
+  return [
+    'Jevy note: this test change was made, but it may be weak. Jev was not sure enough to block it.',
+    ...listed(unsure, item => item.next),
+    'Check it, and fix it if the note is right.',
   ].join('\n');
 }
 
@@ -427,10 +639,13 @@ function evidence(edit: Edit): string[] {
   const lines = (text: string) => stripComments(text, edit.path).split('\n').map(line => line.trim()).filter(line => line !== '');
   const before = lines(edit.old);
   const after = lines(edit.new);
-  const cut = (line: string) => line.length > 200 ? `${line.slice(0, 197)}...` : line;
   const removed = before.filter(line => !after.includes(line)).slice(0, 3).map(line => `  was: ${cut(line)}`);
   const added = after.filter(line => !before.includes(line)).slice(0, 3).map(line => `  now: ${cut(line)}`);
   return [...removed, ...(added.length > 0 ? added : ['  now: (removed)'])];
+}
+
+function cut(line: string): string {
+  return line.length > 200 ? `${line.slice(0, 197)}...` : line;
 }
 
 const SURE = 0.8;
@@ -440,10 +655,23 @@ function scoreIsSure(score: unknown, confidence: unknown): boolean {
   return typeof confidence !== 'number' || confidence >= SURE;
 }
 
-function choiceIsSure(value: Record<string, unknown>): boolean {
+// Sure blocks. From 0.5 up to sure, or sure with low confidence, only adds a note.
+type Level = 'block' | 'warn' | undefined;
+
+function levelOf(score: unknown, confidence: unknown): Level {
+  if (scoreIsSure(score, confidence)) return 'block';
+  return typeof score === 'number' && score >= UNSURE ? 'warn' : undefined;
+}
+
+// For a choice, the score is the probability of the chosen option.
+function choiceLevel(value: Record<string, unknown>): Level {
   const probabilities = value.probabilities;
-  if (!isRecord(probabilities) || typeof value.choice !== 'string') return false;
-  return scoreIsSure(probabilities[value.choice], value.confidence);
+  if (!isRecord(probabilities) || typeof value.choice !== 'string') return;
+  return levelOf(probabilities[value.choice], value.confidence);
+}
+
+function noulLevel(value: unknown): Level {
+  return levelOf(noulScore(value), isRecord(value) ? value.confidence : undefined);
 }
 
 function noulScore(value: unknown): number | undefined {
