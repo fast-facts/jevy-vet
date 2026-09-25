@@ -17,8 +17,20 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks, the check
 - `src/subjects.test.ts` — splitting, title, check file, command scope, definition, literal, comment line, and test helper tests.
 - `src/context.ts` — the setup and the code under test read from the project folder, the instruction files OpenCode loads, split into sentences, the project's source files for the reuse check, the tests related to a source file for the special-case check, the markdown sections that name a changed function for the stale-comment check, and which files are generated. Context only.
 - `src/context.test.ts` — code-under-test lookup, instruction file, sentence, source file, related test, doc section, and generated file tests.
-- `src/review.ts` — what to judge, the TypeSafe call, the block or note decision, the user's allow, the check-weakening check, the special-case check, the instruction check, the reuse check, the claim check, the hidden-error check, and the stale-comment check.
-- `src/review.test.ts` — block decision, check-weakening, special-case, instruction check, reuse check, claim check, hidden-error check, and stale-comment check tests.
+- `src/jev.ts` — the TypeSafe call, the score cutoffs, the shared user-intent question, the note text, and the path and comment helpers the checks share.
+- `src/review.ts` — new tests, edited tests, the check-weakening check, and the special-case check. These share one wait, then block or note.
+- `src/review.test.ts` — block decision, check-weakening, and special-case tests.
+- `src/instructions.ts` — the instruction check.
+- `src/instructions.test.ts` — instruction check tests.
+- `src/reuse.ts` — the reuse check.
+- `src/reuse.test.ts` — reuse check tests.
+- `src/claims.ts` — the claim check.
+- `src/claims.test.ts` — claim check tests.
+- `src/hidden.ts` — the hidden-error check.
+- `src/hidden.test.ts` — hidden-error check tests.
+- `src/stale.ts` — the stale-comment check.
+- `src/stale.test.ts` — stale-comment check tests.
+- `src/fakes.test.ts` — the fake fetch and disk the check tests share.
 
 ## Rules
 
@@ -63,7 +75,7 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks, the check
 - The hidden-error check covers `write`, `edit`, and `apply_patch` changes to source files (`isDefinitionFile`) that are not tests, test support (`isTestSupport`), generated (`isGenerated`), or ignored. It is asked only when an added line handles or defaults an error (`ADDED_ERROR_LINE`) or a removed line raised or returned one (`REMOVED_ERROR_LINE`). That is scope, not a finding. One question per file: does the change hide a failure instead of handling it, with the last failed command as context and the shared user-intent question. It never blocks, and notes only when sure, at 0.8, in `tool.execute.after`. It starts in `tool.execute.before`, reads the changed files before its first await, and runs while the tool does. No key, an unreadable config, or a TypeSafe failure adds nothing. The note names the file, the function or top-level code, the rule, the scoped lines as `was:` and `now:`, and the next step: let it fail loudly or handle it for real, or ask the user.
 - The stale-comment check covers the same changes and skips the same files as the hidden-error check. It is asked only when the change adds or removes a code line or adds a comment line. The comments sent are the block above each touched function, the comments and Python docstring inside it, or the block above the first changed line when no function is touched. Comments are line-based. Markdown sections that name a touched function (`docSections` in `src/context.ts`) are added only when code changed: whole-word match, names of four or more characters, split at headings, at most five sections of 1500 characters. It skips `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, changelogs, and docs the same call changes. Instruction files are the user's rules, and a changelog is right to describe old behavior. That is scope, not a finding.
 - One question per comment, at most twelve: is it wrong about the code after the change. A comment the change wrote is checked the other way: does the code do what it says. The shared user-intent question is asked per file. It never blocks, and notes only when sure, at 0.8, in `tool.execute.after`. It starts in `tool.execute.before`, reads the changed files before its first await, and runs while the tool does. No key, an unreadable config, or a TypeSafe failure adds nothing. The note names the file, the function or top-level code, the rule, the comment as `comment:` or `doc:` with path and line, the changed line as `code:` with path and line or `was:`, and the next step: update the comment or doc, or fix the code or ask the user if the code is what is wrong.
-- The first checks are tests, then instructions, then checks that CI and tests enforce, then reuse, then special cases, then claims, then hidden errors, then stale comments. Add later checks in `src/review.ts`. Do not rename the package for a new check.
+- The first checks are tests, then instructions, then checks that CI and tests enforce, then reuse, then special cases, then claims, then hidden errors, then stale comments. Add a later note-only check as its own file next to `src/review.ts`, and start it from `src/index.ts`. A check that blocks stays in `src/review.ts` with the other blocking checks. Do not rename the package for a new check.
 - The published npm name is `jevy-vet`. Do not rename it. Install steps are in `README.md`.
 - OpenCode 1 only. Do not claim OpenCode 2 support. V2 needs `Plugin.define` and `setup()`, and a V1 function does not run there.
 - Do not edit the user's OpenCode config from this repo.

@@ -1,7 +1,13 @@
 import { homedir } from 'node:os';
+import { checkClaims, type Step } from './claims.ts';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { type Block, checkClaims, checkHiddenErrors, checkInstructions, checkReuse, checkStaleDocs, type Failure, review, shownPath, type Step } from './review.ts';
+import { checkHiddenErrors } from './hidden.ts';
+import { checkInstructions } from './instructions.ts';
+import { type Block, type Failure, shownPath } from './jev.ts';
+import { review } from './review.ts';
+import { checkReuse } from './reuse.ts';
 import { loadSettings } from './settings.ts';
+import { checkStaleDocs } from './stale.ts';
 import { changesFrom, commandFrom } from './subjects.ts';
 
 interface Input {
@@ -57,8 +63,8 @@ const MAX_STEP_OUTPUT_CHARS = 1000;
 // Enough to find the last user message behind a long run of tool steps.
 const READ_MESSAGES = 50;
 
-// Blocks useless test writes and changes that weaken a check, notes unsure ones, edits that may break the user's instructions, new code that repeats existing code,
-// and source edits that may hide an error. It also checks the agent's final message against what it did when the session goes idle, by calling TypeSafe directly.
+// Blocks useless test writes, weakened checks, and special-cased tests. Notes unsure ones, broken instructions, repeated code, hidden errors, and stale comments.
+// When the session goes idle, it checks the agent's last message against what it did. It calls TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
