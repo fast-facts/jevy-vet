@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { changesFrom, editsFrom, stripComments, testFilesFrom, titleOf } from './subjects.ts';
+import { changesFrom, commandFrom, editsFrom, isGatePath, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
 describe('testFilesFrom', () => {
   test('splits a write into setup and one case per test', () => {
@@ -178,5 +178,39 @@ describe('changesFrom', () => {
       { path: 'src/client.ts', old: 'export function get() {\n  return 1', new: 'export function get() {\n  return 2' },
       { path: 'old.md', old: 'old notes', new: '' },
     ]);
+  });
+});
+
+describe('check files and commands', () => {
+  test('recognizes CI, script, test, lint, type-check, and hook files', () => {
+    const yes = [
+      '.github/workflows/ci.yml', '/repo/.github/workflows/release.yaml', '.circleci/config.yml', '.husky/pre-commit', '.gitlab-ci.yml', 'Jenkinsfile',
+      'package.json', 'pkg/package.json', 'bunfig.toml', 'tsconfig.json', 'tsconfig.build.json', 'jsconfig.json',
+      'eslint.config.js', 'eslint.config.mjs', '.eslintrc.json', '.eslintrc', '.eslintignore', 'biome.json',
+      'jest.config.ts', 'vitest.config.mts', 'vite.config.ts', 'playwright.config.ts', '.mocharc.yml', '.nycrc.json',
+      'pyproject.toml', 'pytest.ini', 'setup.cfg', 'tox.ini', '.coveragerc', 'mypy.ini', 'ruff.toml', '.flake8',
+      '.golangci.yml', '.pre-commit-config.yaml', 'lefthook.yml', 'Makefile', 'C:\\repo\\tsconfig.json',
+    ];
+    for (const path of yes) expect([path, isGatePath(path)]).toEqual([path, true]);
+    for (const path of ['src/index.ts', 'README.md', 'src/add.test.ts', 'docs/workflows.md', 'package-lock.json', 'tsconfig.ts', '.github/CODEOWNERS']) {
+      expect([path, isGatePath(path)]).toEqual([path, false]);
+    }
+  });
+
+  test('reads a bash command and its workdir', () => {
+    expect(commandFrom('bash', { command: 'git status', workdir: '/repo', description: 'x' })).toEqual({ command: 'git status', workdir: '/repo' });
+    expect(commandFrom('bash', { command: 'ls' })).toEqual({ command: 'ls' });
+    expect(commandFrom('bash', { command: '  ' })).toBeUndefined();
+    expect(commandFrom('write', { command: 'git status' })).toBeUndefined();
+    expect(commandFrom('bash', 'git status')).toBeUndefined();
+  });
+
+  test('scopes commands to git, tests, test folders, and check files', () => {
+    for (const command of ['git commit --no-verify -m x', 'cd a && git push', 'rm src/a.test.ts', 'rm -rf tests', 'rm -r ./test/', 'mv src/__tests__ /tmp', 'sed -i s/x/y/ .eslintrc.json', 'echo \'{}\' > tsconfig.json', 'HUSKY=0 npm run release', 'bun pm pkg set scripts.test=true', 'bun set-script test true', 'rm .husky/pre-commit']) {
+      expect([command, touchesGates(command)]).toEqual([command, true]);
+    }
+    for (const command of ['bun test', 'npm test', 'go test ./...', 'ls -la', 'bun run lint', 'cat src/index.ts', 'npx tsc --noEmit -p .', 'bun install']) {
+      expect([command, touchesGates(command)]).toEqual([command, false]);
+    }
   });
 });

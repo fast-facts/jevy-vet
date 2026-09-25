@@ -1,7 +1,8 @@
 import { homedir } from 'node:os';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { type Block, checkInstructions, review } from './review.ts';
+import { type Block, checkInstructions, type Failure, review } from './review.ts';
 import { loadSettings } from './settings.ts';
+import { commandFrom } from './subjects.ts';
 
 interface Input {
   // The project folder. OpenCode passes it. The code under test is only read from inside it.
@@ -33,11 +34,12 @@ interface PluginEvent {
 
 const KEEP_MESSAGES = 3;
 const MAX_MESSAGE_CHARS = 4000;
+const MAX_FAILURE_CHARS = 4000;
 const KEEP_SESSIONS = 100;
 // Checks started before a tool runs and not yet collected after it. A failed tool never collects.
 const KEEP_PENDING = 50;
 
-// Blocks useless test writes, notes unsure ones and edits that may break the user's instructions, by calling TypeSafe directly.
+// Blocks useless test writes and changes that weaken a check, notes unsure ones and edits that may break the user's instructions, by calling TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
@@ -49,6 +51,8 @@ export default async function jevyVet(input: Input) {
   const counts = new Map<string, number>();
   // Earlier blocks per top-level session, so the user can allow one and retry loops are noticed.
   const blocks = new Map<string, Map<string, Block>>();
+  // The last failed bash command per top-level session. Sent as context, not judged.
+  const failures = new Map<string, Failure>();
   // A subagent's prompt is written by the parent agent, not the user. It never counts as the user asking.
   // The parent is kept so a subagent's edits are still checked against the user's instructions.
   const parents = new Map<string, string>();
@@ -57,6 +61,16 @@ export default async function jevyVet(input: Input) {
   const sentences = new Map<string, boolean>();
   const pending = new Map<string, Promise<string | undefined>>();
   const disk = { root, read: readSource, list: listDir };
+  // The user of a subagent session is the user of the session that started it.
+  const topOf = (session: string) => {
+    let top = session;
+    for (let hops = 0; hops < 10; hops += 1) {
+      const parent = parents.get(top);
+      if (parent === undefined) break;
+      top = parent;
+    }
+    return top;
+  };
   const log = (message: string) => {
     try {
       void input.client.app
@@ -110,13 +124,7 @@ export default async function jevyVet(input: Input) {
         disk,
         log,
       };
-      // The user of a subagent session is the user of the session that started it.
-      let top = session;
-      for (let hops = 0; hops < 10; hops += 1) {
-        const parent = parents.get(top);
-        if (parent === undefined) break;
-        top = parent;
-      }
+      const top = topOf(session);
       // A block in a subagent is answered by the user in the top session, so blocks are kept there.
       let sessionBlocks = blocks.get(top);
       if (!sessionBlocks) {
@@ -131,7 +139,7 @@ export default async function jevyVet(input: Input) {
       const reason = await review(hook.tool, output.args, {
         ...shared,
         userMessages: parents.has(session) ? [] : messages.get(session) ?? [],
-        history: { blocks: sessionBlocks, messages: messages.get(top) ?? [], messageCount: counts.get(top) ?? 0 },
+        history: { blocks: sessionBlocks, messages: messages.get(top) ?? [], messageCount: counts.get(top) ?? 0, lastFailure: failures.get(top) },
         warn: note => notes.push(note),
       });
       if (reason) throw new Error(reason);
@@ -154,6 +162,20 @@ export default async function jevyVet(input: Input) {
     },
     // OpenCode returns this same output object to the model, so an appended note reaches the agent.
     'tool.execute.after': async (hook: { tool: string; sessionID: string; callID: string; args: unknown }, output: { title: string; output: string; metadata: unknown }) => {
+      const run = commandFrom(hook.tool, hook.args);
+      // OpenCode's bash tool returns a failed command as output, with the exit code in metadata.
+      const exit = typeof output.metadata === 'object' && output.metadata !== null && 'exit' in output.metadata ? output.metadata.exit : undefined;
+      if (run && typeof exit === 'number') {
+        const top = topOf(hook.sessionID);
+        if (exit !== 0) {
+          failures.delete(top);
+          failures.set(top, { command: run.command, output: headTail(output.output, MAX_FAILURE_CHARS).text });
+          if (failures.size > KEEP_SESSIONS) {
+            const oldest = failures.keys().next().value;
+            if (oldest !== undefined) failures.delete(oldest);
+          }
+        } else if (failures.get(top)?.command === run.command) failures.delete(top);
+      }
       const check = pending.get(hook.callID);
       if (!check) return;
       pending.delete(hook.callID);

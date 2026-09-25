@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 import { type Settings } from './settings.ts';
 import { contextFor, type Disk, type FileContext, headTail, type InstructionFile, sentencesOf } from './context.ts';
-import { type Change, changesFrom, type EditPair, editsFrom, stripComments, type TestFile, testFilesFrom, titleOf } from './subjects.ts';
+import { type Change, changesFrom, type Command, commandFrom, type EditPair, editsFrom, isGatePath, stripComments, type TestFile, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
 // Jev allows 32k tokens for state plus the longest question, and 64k for state plus all questions.
 // A token is at least 3 characters of code, so these stay well inside both.
@@ -10,6 +10,9 @@ const MAX_STATE_CHARS = 72_000;
 const MAX_QUESTIONS = 100;
 const MAX_EDIT_SIDE_CHARS = 6000;
 const MAX_EDITS_PER_REQUEST = 25;
+// Both sides of each change, so five stay inside MAX_STATE_CHARS.
+const MAX_GATES_PER_REQUEST = 5;
+const GATE_CONTEXT_LINES = 5;
 
 interface Ref {
   test: string;
@@ -115,6 +118,20 @@ const BAD_CHANGES: Record<string, string> = {
 const REMOVED_TEST = 'Test removed: A test or assertion is gone and nothing checks the same behavior.';
 const FIX_CODE = 'Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.';
 
+const GATE_NAME = 'check settings';
+const WEAKENED_GATE = 'Weakened check: The change makes a CI, test, lint, or type check weaker, or lets it be skipped.';
+const KEEP_GATE = 'Keep the check as it was and fix the code it fails on. If the check itself is wrong, stop and ask the user before you change it.';
+const BYPASSED_GATE = 'Bypassed check: The command skips or weakens a CI, test, lint, or type check, or a git hook.';
+const RUN_GATES = 'Run the checks as they are and fix what fails. If a check or hook is wrong, stop and ask the user before you skip it.';
+const GATE_CRITERIA = {
+  true: 'It removes, skips, or turns off a step, test, rule, or hook, lets it fail without failing the run (for example `continue-on-error` or `|| true`), loosens a threshold or a strictness setting, or excludes files or paths from it.',
+  false: 'It adds or tightens checks, only renames, reorders, or reformats them, updates versions, or changes something no check depends on.',
+};
+const COMMAND_CRITERIA = {
+  true: 'It skips a git hook, for example with `--no-verify` or by turning hooks off, edits CI, test, lint, or type-check settings to be looser, deletes or turns off tests, or makes a failing check report success.',
+  false: 'It only reads, runs checks as they are, or changes code or files no check depends on. Running only some of the tests does not count.',
+};
+
 export interface ReviewDeps {
   load: () => Settings;
   fetch: (url: string, init: RequestInit) => Promise<Response>;
@@ -125,7 +142,7 @@ export interface ReviewDeps {
   userMessages?: string[];
   // Earlier blocks, so the user can allow one and a retry loop is noticed.
   history?: History;
-  // Receives a note for tests Jev is unsure about. The plugin adds it to the tool output.
+  // Receives a note for tests and checks Jev is unsure about. The plugin adds it to the tool output.
   warn?: (note: string) => void;
 }
 
@@ -136,6 +153,14 @@ export interface History {
   // The user's latest real messages, oldest first, and how many there have been in all.
   messages: string[];
   messageCount: number;
+  // The last command that failed, so Jev can see what a change to a check may hide.
+  lastFailure?: Failure;
+}
+
+export interface Failure {
+  command: string;
+  // Head and tail of what it printed.
+  output: string;
 }
 
 export interface Block {
@@ -148,7 +173,7 @@ export interface Block {
 }
 
 interface Finding {
-  kind: 'write' | 'edit';
+  kind: 'write' | 'edit' | 'gate' | 'command';
   key: string;
   path: string;
   test: string;
@@ -228,38 +253,94 @@ interface Edit extends EditPair {
   key: string;
 }
 
+interface Gate {
+  id: string;
+  path: string;
+  key: string;
+  // Comments are already removed where the syntax is known. old is missing for a new file.
+  old?: string;
+  new: string;
+}
+
+interface CheckedCommand extends Command {
+  id: string;
+  key: string;
+}
+
+interface GateRequest {
+  state: {
+    purpose: string;
+    user_messages?: string[];
+    last_failure?: Failure;
+    changes?: { path: string; old?: string; new: string }[];
+    command?: Command;
+  };
+  questions: Record<string, Question>;
+}
+
 export async function review(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
+  const read = reader(deps.disk);
   const files = testFilesFrom(tool, args);
-  const edits: Edit[] = editsFrom(tool, args, reader(deps.disk)).map((pair, n) => {
+  const edits: Edit[] = editsFrom(tool, args, read).map((pair, n) => {
     const name = testName(pair.title, 'an edited test');
     return { ...pair, id: `e${n}`, name, key: `${pair.path}\n${name}` };
   });
-  if (files.length === 0 && edits.length === 0) return;
+  const gates: Gate[] = [];
+  for (const change of changesFrom(tool, args, read)) {
+    if (!isGatePath(change.path) || ignoredPath(change.path)) continue;
+    gates.push({
+      id: `g${gates.length}`,
+      path: change.path,
+      key: `${change.path}\n${GATE_NAME}`,
+      ...(change.old === undefined ? {} : { old: withoutComments(change.old, change.path) }),
+      new: withoutComments(change.new, change.path),
+    });
+  }
+  const run = commandFrom(tool, args);
+  // Keyed by the command, so a retry of the same command is counted and allowed as one.
+  const command: CheckedCommand | undefined = run && touchesGates(run.command)
+    ? { id: 'b0', key: `bash\n${cut(oneLine(run.command))}`, command: run.command, ...(run.workdir ? { workdir: run.workdir } : {}) }
+    : undefined;
+  const tests = files.length > 0 || edits.length > 0;
+  if (!tests && gates.length === 0 && !command) return;
 
-  const names = [...new Set([...files, ...edits].map(item => item.path))].join(', ');
   const settings = deps.load();
-  if (settings.error) return `${settings.error} Jevy blocked the test write for ${names}.`;
-  if (settings.key.trim() === '') return `TYPESAFE_API_KEY is not set. Jevy blocked the test write for ${names}. Add it to ${settings.path}.`;
+  // A missing key blocks only a test write. Checks and commands skip quietly, like the instruction check.
+  if (settings.error || settings.key.trim() === '') {
+    if (!tests) return;
+    const names = [...new Set([...files, ...edits].map(item => item.path))].join(', ');
+    if (settings.error) return `${settings.error} Jevy blocked the test write for ${names}.`;
+    return `TYPESAFE_API_KEY is not set. Jevy blocked the test write for ${names}. Add it to ${settings.path}.`;
+  }
 
   const once = logOnce(deps);
   const prepared = prepare(files, deps.disk);
   const userMessages = deps.userMessages ?? [];
-  const blockKeys = [...prepared.flatMap(item => item.cases.map(test => test.key)), ...edits.map(edit => edit.key)];
+  const blockKeys = [...prepared.flatMap(item => item.cases.map(test => test.key)), ...edits.map(edit => edit.key), ...gates.map(gate => gate.key), ...(command ? [command.key] : [])];
   // Asked with the checks, not after them, so an allowed retry costs no extra wait.
   const override = overrideRequest([...new Set(blockKeys)], deps.history);
-  const all = [...batches(prepared), ...editBatches(edits, userMessages), ...(override ? [override.request] : [])];
-  const results = await Promise.all(all.map(batch => callTypeSafe(once, settings, batch, 'The test write was allowed.')));
+  const all = [
+    ...batches(prepared),
+    ...editBatches(edits, userMessages),
+    ...gateRequests(gates, command, userMessages, deps.history?.lastFailure),
+    ...(override ? [override.request] : []),
+  ];
+  let allowed = 'The change was allowed.';
+  if (tests) allowed = 'The test write was allowed.';
+  else if (command) allowed = 'The command was allowed.';
+  const results = await Promise.all(all.map(batch => callTypeSafe(once, settings, batch, allowed)));
   const answers: Record<string, unknown> = {};
   for (const result of results) if (result) Object.assign(answers, result);
 
-  const findings = [...testFindings(prepared, answers), ...editFindings(edits, answers, once)];
+  const findings = [...testFindings(prepared, answers), ...editFindings(edits, answers, once), ...gateFindings(gates, command, answers, once)];
   const blocked: Finding[] = [];
   for (const finding of findings.filter(item => item.block)) {
     const id = override?.ids.get(finding.key);
-    const allowed = id === undefined ? undefined : noulScore(answers[id]);
+    const score = id === undefined ? undefined : noulScore(answers[id]);
     // 0.5 or higher allows it, the same as the user-intent question. A missing answer does not.
-    if (allowed !== undefined && allowed >= 0.5) {
-      once.log?.(`${finding.path}: the user allowed the blocked change to ${finding.test}. The write was allowed.`);
+    if (score !== undefined && score >= 0.5) {
+      const what = finding.kind === 'command' ? 'command' : 'write';
+      once.log?.(`${finding.path}: the user allowed the blocked change to ${finding.test}. The ${what} was allowed.`);
       continue;
     }
     blocked.push(finding);
@@ -298,7 +379,7 @@ function overrideRequest(keys: string[], history: History | undefined): { ids: M
   const ids = new Map<string, string>();
   const request: OverrideRequest = {
     state: {
-      purpose: 'Jevy blocked a change to a test, and the agent was told it may ask the user to allow it. Decide whether the user has allowed each blocked change. `block` is what Jevy told the agent. `user_messages` are only the user\'s messages written after that block, oldest first.',
+      purpose: 'Jevy blocked a change to a test or a check, or a command, and the agent was told it may ask the user to allow it. Decide whether the user has allowed each blocked change. `block` is what Jevy told the agent. `user_messages` are only the user\'s messages written after that block, oldest first.',
       blocks: [],
     },
     questions: {},
@@ -317,7 +398,7 @@ function overrideRequest(keys: string[], history: History | undefined): { ids: M
       type: 'noul',
       instructions: `Does the user's latest message in \`blocks[${n}].user_messages\` ask to allow the change Jevy blocked in \`blocks[${n}].block\`?`,
       criteria: {
-        true: 'The user tells the agent to go ahead with this change, to allow it or keep it, or says Jevy is wrong about this test.',
+        true: 'The user tells the agent to go ahead with this change, to allow it or keep it, or says Jevy is wrong about it.',
         false: 'The user does not mention it, asks for something else, or agrees with Jevy.',
       },
     };
@@ -423,14 +504,10 @@ function editBatches(edits: Edit[], userMessages: string[]): EditRequest[] {
         },
       };
       if (userMessages.length > 0) {
-        questions[`${edit.id}_user_asked`] = {
-          type: 'noul',
-          instructions: `Do the user's messages in \`user_messages\` ask for the change from \`${at}.old\` to \`${at}.new\`?`,
-          criteria: {
-            true: 'The user asks for this behavior or expected value to change, or asks to change, loosen, skip, or remove this test.',
-            false: 'The user does not ask for it. Asking to fix a failure or to make the tests pass does not count.',
-          },
-        };
+        questions[`${edit.id}_user_asked`] = userAsked(
+          `the change from \`${at}.old\` to \`${at}.new\``,
+          'The user asks for this behavior or expected value to change, or asks to change, loosen, skip, or remove this test.',
+        );
       }
     }
     out.push({
@@ -443,6 +520,87 @@ function editBatches(edits: Edit[], userMessages: string[]): EditRequest[] {
     });
   }
   return out;
+}
+
+function userAsked(change: string, asks: string): Question {
+  return {
+    type: 'noul',
+    instructions: `Do the user's messages in \`user_messages\` ask for ${change}?`,
+    criteria: {
+      true: asks,
+      false: 'The user does not ask for it. Asking to fix a failure or to make the tests pass does not count.',
+    },
+  };
+}
+
+function gateRequests(gates: Gate[], command: CheckedCommand | undefined, userMessages: string[], lastFailure: Failure | undefined): GateRequest[] {
+  const shared = {
+    ...(userMessages.length > 0 ? { user_messages: userMessages } : {}),
+    ...(lastFailure ? { last_failure: lastFailure } : {}),
+  };
+  const out: GateRequest[] = [];
+  for (let start = 0; start < gates.length; start += MAX_GATES_PER_REQUEST) {
+    const changes: { path: string; old?: string; new: string }[] = [];
+    const questions: Record<string, Question> = {};
+    for (const gate of gates.slice(start, start + MAX_GATES_PER_REQUEST)) {
+      const at = `\`changes[${changes.length}]\``;
+      changes.push({ path: gate.path, ...sides(gate) });
+      questions[`${gate.id}_weakens_gate`] = {
+        type: 'noul',
+        instructions: `Does the change in ${at} weaken or bypass a check that CI, the tests, lint, or type checking enforce?`,
+        criteria: GATE_CRITERIA,
+      };
+      if (userMessages.length > 0) {
+        questions[`${gate.id}_user_asked`] = userAsked(`the change in ${at}`, 'The user asks to change, loosen, skip, or turn off this check, step, rule, or hook.');
+      }
+    }
+    out.push({
+      state: {
+        purpose: 'Decide whether each change in `changes` makes a CI, test, lint, type-check, or git hook check weaker, so a failing check would stop failing without the code being fixed. `old` is the text before the change, missing for a new file, and `new` is after it. Comments were removed from code files. `last_failure`, when present, is the last command that failed. It may be unrelated.',
+        ...shared,
+        changes,
+      },
+      questions,
+    });
+  }
+  if (!command) return out;
+  const questions: Record<string, Question> = {
+    [`${command.id}_weakens_gate`]: {
+      type: 'noul',
+      instructions: 'Does the shell command in `command` weaken or bypass a check that CI, the tests, lint, type checking, or a git hook enforce?',
+      criteria: COMMAND_CRITERIA,
+    },
+  };
+  if (userMessages.length > 0) {
+    questions[`${command.id}_user_asked`] = userAsked('the command in `command`', 'The user asks to run this command, or to skip, loosen, or turn off the check or hook it affects.');
+  }
+  out.push({
+    state: {
+      purpose: 'Decide whether the shell command in `command` weakens or skips a CI, test, lint, type-check, or git hook check, so a failing check would stop failing without the code being fixed. It has not run yet. `last_failure`, when present, is the last command that failed. It may be unrelated.',
+      ...shared,
+      command: { command: headTail(command.command, MAX_EDIT_SIDE_CHARS).text, ...(command.workdir ? { workdir: command.workdir } : {}) },
+    },
+    questions,
+  });
+  return out;
+}
+
+// A long file sends only the lines that differ and a few around them, so the change is not cut out of the middle.
+function sides(gate: Gate): { old?: string; new: string } {
+  if (gate.old === undefined) return { new: headTail(gate.new, MAX_EDIT_SIDE_CHARS).text };
+  if (gate.old.length <= MAX_EDIT_SIDE_CHARS && gate.new.length <= MAX_EDIT_SIDE_CHARS) return { old: gate.old, new: gate.new };
+  const before = gate.old.split('\n');
+  const after = gate.new.split('\n');
+  let samePrefix = 0;
+  while (samePrefix < before.length && samePrefix < after.length && before[samePrefix] === after[samePrefix]) samePrefix += 1;
+  let sameSuffix = 0;
+  while (sameSuffix < before.length - samePrefix && sameSuffix < after.length - samePrefix && before[before.length - 1 - sameSuffix] === after[after.length - 1 - sameSuffix]) sameSuffix += 1;
+  const from = Math.max(0, samePrefix - GATE_CONTEXT_LINES);
+  const keep = Math.max(0, sameSuffix - GATE_CONTEXT_LINES);
+  return {
+    old: headTail(before.slice(from, before.length - keep).join('\n'), MAX_EDIT_SIDE_CHARS).text,
+    new: headTail(after.slice(from, after.length - keep).join('\n'), MAX_EDIT_SIDE_CHARS).text,
+  };
 }
 
 function emptyBatch(): Batch {
@@ -488,7 +646,7 @@ function reader(disk: Disk | undefined): (path: string) => string | undefined {
 async function callTypeSafe(
   deps: ReviewDeps,
   settings: Settings,
-  batch: Batch | EditRequest | OverrideRequest | SentenceRequest | RuleRequest,
+  batch: Batch | EditRequest | GateRequest | OverrideRequest | SentenceRequest | RuleRequest,
   allowed: string,
 ): Promise<Record<string, unknown> | undefined> {
   const key = settings.key.trim();
@@ -574,11 +732,7 @@ function editFindings(edits: Edit[], answers: Record<string, unknown>, deps: Rev
     if (isRecord(change) && typeof change.choice === 'string' && change.choice in BAD_CHANGES) add(choiceLevel(change), BAD_CHANGES[change.choice]);
     add(noulLevel(answers[`${edit.id}_removes_test`]), REMOVED_TEST);
     if (sure.length === 0 && unsure.length === 0) continue;
-    const asked = noulScore(answers[`${edit.id}_user_asked`]);
-    if (asked !== undefined && asked >= 0.5) {
-      deps.log?.(`${edit.path}: the user asked for this test change. The edit was allowed.`);
-      continue;
-    }
+    if (askedFor(answers, edit.id, deps, `${edit.path}: the user asked for this test change. The edit was allowed.`)) continue;
     findings.push({
       kind: 'edit',
       key: edit.key,
@@ -586,11 +740,52 @@ function editFindings(edits: Edit[], answers: Record<string, unknown>, deps: Rev
       test: edit.name,
       block: sure.length > 0,
       fails: [...new Set(sure.length > 0 ? sure : unsure)],
-      evidence: evidence(edit),
+      evidence: evidence(stripComments(edit.old, edit.path), stripComments(edit.new, edit.path)),
       next: FIX_CODE,
     });
   }
   return findings;
+}
+
+function gateFindings(gates: Gate[], command: CheckedCommand | undefined, answers: Record<string, unknown>, deps: ReviewDeps): Finding[] {
+  const findings: Finding[] = [];
+  for (const gate of gates) {
+    const level = noulLevel(answers[`${gate.id}_weakens_gate`]);
+    if (!level) continue;
+    if (askedFor(answers, gate.id, deps, `${gate.path}: the user asked for this change to a check. The change was allowed.`)) continue;
+    findings.push({
+      kind: 'gate',
+      key: gate.key,
+      path: gate.path,
+      test: GATE_NAME,
+      block: level === 'block',
+      fails: [WEAKENED_GATE],
+      evidence: evidence(gate.old ?? '', gate.new),
+      next: KEEP_GATE,
+    });
+  }
+  if (!command) return findings;
+  const level = noulLevel(answers[`${command.id}_weakens_gate`]);
+  if (!level || askedFor(answers, command.id, deps, 'bash: the user asked for this command. The command was allowed.')) return findings;
+  findings.push({
+    kind: 'command',
+    key: command.key,
+    path: 'bash',
+    test: 'this command',
+    block: level === 'block',
+    fails: [BYPASSED_GATE],
+    evidence: [`  command: ${cut(oneLine(command.command))}`],
+    next: RUN_GATES,
+  });
+  return findings;
+}
+
+// 0.5 or higher on the user-intent question allows it, before any block.
+function askedFor(answers: Record<string, unknown>, id: string, deps: ReviewDeps, message: string): boolean {
+  const asked = noulScore(answers[`${id}_user_asked`]);
+  if (asked === undefined || asked < 0.5) return false;
+  deps.log?.(message);
+  return true;
 }
 
 function testName(title: string | undefined, fallback: string): string {
@@ -607,41 +802,61 @@ function listed(findings: Finding[], next: (finding: Finding) => string): string
   return lines;
 }
 
+const NOUNS: Record<Finding['kind'], string> = { write: 'test', edit: 'test', gate: 'change', command: 'command' };
+
 function blockText(blocked: Finding[], history: History | undefined): string {
   const countOf = (item: Finding) => history?.blocks.get(item.key)?.count ?? 0;
   const kinds = new Set(blocked.map(item => item.kind));
-  let what = 'test write';
-  if (kinds.size > 1) what = 'test write and edit';
-  else if (kinds.has('edit')) what = 'test edit';
+  const again = kinds.has('command') ? 'run it again' : 'write it again';
   const looping = blocked.some(item => countOf(item) >= LOOP_BLOCKS);
-  const ask = looping ? 'If the user allows it, write it again and it will go through.' : 'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.';
+  const ask = looping ? `If the user allows it, ${again} and it will go through.` : `If you think Jevy is wrong, ask the user. If they allow it, ${again} and it will go through.`;
   return [
-    `Jevy blocked this ${what}.`,
+    `Jevy blocked this ${blockedWhat(kinds)}.`,
     ...listed(blocked, item => {
       const count = countOf(item);
-      if (count >= LOOP_BLOCKS) return `This test was blocked ${count} times in a row. Stop retrying it. Ask the user how to go on, or ask them to allow it.`;
+      if (count >= LOOP_BLOCKS) return `This ${NOUNS[item.kind]} was blocked ${count} times in a row. Stop retrying it. Ask the user how to go on, or ask them to allow it.`;
       return item.next;
     }),
     ask,
   ].join('\n');
 }
 
+// A command never comes with a file change. They are different tools.
+function blockedWhat(kinds: Set<Finding['kind']>): string {
+  if (kinds.has('command')) return 'command';
+  let what = '';
+  if (kinds.has('write') && kinds.has('edit')) what = 'test write and edit';
+  else if (kinds.has('edit')) what = 'test edit';
+  else if (kinds.has('write')) what = 'test write';
+  if (!kinds.has('gate')) return what;
+  if (what === '') return 'change to a check';
+  return `${what} and change to a check`;
+}
+
 function noteText(unsure: Finding[]): string {
+  const kinds = new Set(unsure.map(item => item.kind));
+  let what = 'this test change was made, but it may be weak.';
+  if (kinds.has('command')) what = 'this command ran, but it may weaken a check.';
+  else if (kinds.has('gate')) what = 'this change was made, but it may weaken a test or a check.';
   return [
-    'Jevy note: this test change was made, but it may be weak. Jev was not sure enough to block it.',
+    `Jevy note: ${what} Jev was not sure enough to block it.`,
     ...listed(unsure, item => item.next),
     'Check it, and fix it if the note is right.',
   ].join('\n');
 }
 
-// The old and new lines that differ, so the agent sees what it changed.
-function evidence(edit: Edit): string[] {
-  const lines = (text: string) => stripComments(text, edit.path).split('\n').map(line => line.trim()).filter(line => line !== '');
-  const before = lines(edit.old);
-  const after = lines(edit.new);
+// The old and new lines that differ, so the agent sees what it changed. Comments are already removed.
+function evidence(oldText: string, newText: string): string[] {
+  const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(line => line !== '');
+  const before = lines(oldText);
+  const after = lines(newText);
   const removed = before.filter(line => !after.includes(line)).slice(0, 3).map(line => `  was: ${cut(line)}`);
   const added = after.filter(line => !before.includes(line)).slice(0, 3).map(line => `  now: ${cut(line)}`);
   return [...removed, ...(added.length > 0 ? added : ['  now: (removed)'])];
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function cut(line: string): string {
@@ -697,6 +912,15 @@ const MAX_WARNINGS = 5;
 // Comments are stripped only where the syntax is known. Prose like "don't" is not a quote.
 const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|swift|cs|c|cc|cpp|h|hpp|scala|dart)$/;
 
+function withoutComments(text: string, path: string): string {
+  return CODE_FILE.test(path) ? stripComments(text, path) : text;
+}
+
+// jevy-vet's own config and installed packages are never checked.
+function ignoredPath(path: string): boolean {
+  return /(?:^|[\\/])node_modules[\\/]/.test(path) || /(?:^|[\\/])jevy-vet\.jsonc?$/.test(path);
+}
+
 export interface InstructionDeps extends ReviewDeps {
   // Instruction files that apply to the changed paths, global first and nearest last.
   instructionFiles: (paths: string[]) => InstructionFile[];
@@ -730,9 +954,7 @@ interface RuleRequest {
 // so a `write` is compared with the file as it was before the write.
 export async function checkInstructions(tool: string, args: unknown, deps: InstructionDeps): Promise<string | undefined> {
   const root = deps.disk?.root ?? '';
-  // jevy-vet's own config and installed packages are never checked.
-  const ignored = (path: string) => /(?:^|[\\/])node_modules[\\/]/.test(path) || /(?:^|[\\/])jevy-vet\.jsonc?$/.test(path);
-  const changes = changesFrom(tool, args, reader(deps.disk)).filter(change => !ignored(change.path)).slice(0, MAX_CHANGES);
+  const changes = changesFrom(tool, args, reader(deps.disk)).filter(change => !ignoredPath(change.path)).slice(0, MAX_CHANGES);
   if (changes.length === 0) return;
   const userMessages = deps.userMessages ?? [];
   const files = deps.instructionFiles(changes.map(change => change.path));
@@ -854,7 +1076,7 @@ function sentenceRequest(chunk: Sentence[], userMessages: string[]): SentenceReq
 
 function ruleRequest(changes: Change[], rules: Sentence[], userMessages: string[]): RuleRequest {
   const questions: Record<string, Question> = {};
-  const side = (text: string, path: string) => headTail(CODE_FILE.test(path) ? stripComments(text, path) : text, MAX_EDIT_SIDE_CHARS).text;
+  const side = (text: string, path: string) => headTail(withoutComments(text, path), MAX_EDIT_SIDE_CHARS).text;
   for (const j of changes.keys()) {
     for (const k of rules.keys()) {
       questions[`c${j}_i${k}_breaks`] = {

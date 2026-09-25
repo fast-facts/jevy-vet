@@ -1,6 +1,6 @@
 # AGENTS.md
 
-OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The instruction check only warns. It calls the API itself. It does not use the Jev MCP server.
+OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks and the check-weakening check block. The instruction check only warns. It calls the API itself. It does not use the Jev MCP server.
 
 ## Commands
 
@@ -9,16 +9,16 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The
 
 ## Layout
 
-- `src/index.ts` — plugin entry. The only export must be the default function. It also keeps the user's latest messages per session from `chat.message`, skips subagent sessions, keeps blocks per top-level session, starts the instruction check in `tool.execute.before`, and adds the notes in `tool.execute.after`, matched by `callID`.
+- `src/index.ts` — plugin entry. The only export must be the default function. It also keeps the user's latest messages per session from `chat.message`, skips subagent sessions, keeps blocks per top-level session, starts the instruction check in `tool.execute.before`, and adds the notes in `tool.execute.after`, matched by `callID`. `tool.execute.after` also keeps the last failed `bash` command per top-level session, from `metadata.exit`.
 - `src/index.test.ts` — plugin hook tests.
 - `src/settings.ts` — read `jevy-vet.jsonc` when a write is about to happen. Do not read it at import time.
 - `src/settings.test.ts` — config read tests.
-- `src/subjects.ts` — the new test text from `write`, `edit`, and `apply_patch`, split into setup and one case per test. Also the old and new text of each changed test, for the edit check, and of each changed file of any kind, for the instruction check.
-- `src/subjects.test.ts` — splitting and title tests.
+- `src/subjects.ts` — the new test text from `write`, `edit`, and `apply_patch`, split into setup and one case per test. Also the old and new text of each changed test, for the edit check, and of each changed file of any kind, for the instruction check. Which files set a check, the `bash` command, and which commands are in scope for the check-weakening check.
+- `src/subjects.test.ts` — splitting, title, check file, and command scope tests.
 - `src/context.ts` — the setup and the code under test read from the project folder, and the instruction files OpenCode loads, split into sentences. Context only.
 - `src/context.test.ts` — code-under-test lookup, instruction file, and sentence tests.
-- `src/review.ts` — what to judge, the TypeSafe call, the block or note decision, the user's allow, and the instruction check.
-- `src/review.test.ts` — block decision tests.
+- `src/review.ts` — what to judge, the TypeSafe call, the block or note decision, the user's allow, the check-weakening check, and the instruction check.
+- `src/review.test.ts` — block decision, check-weakening, and instruction check tests.
 
 ## Rules
 
@@ -41,15 +41,20 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks block. The
 - Instruction files are the one thing read outside the project folder, and only at those paths. Cut each to 8,000 characters and all to 24,000.
 - Split instructions into sentences in code. Ask Jev once per sentence whether it is a rule, and cache the answer in memory. Do not cache a missing answer.
 - A later user message can lift an instruction. Order instructions oldest first, files before messages, and keep the newest when capping.
-- A block or note names, per test: the file, the test, the rule with one plain line, the evidence, and the next step. Evidence is copied from the text, never made up: assertion or mock lines for a new test, and the old and new lines for an edit. List at most five tests.
+- A block or note names, per test: the file, the test, the rule with one plain line, the evidence, and the next step. Evidence is copied from the text, never made up: assertion or mock lines for a new test, the old and new lines for an edit or a check file, and the command for `bash`. List at most five.
 - A block message never suggests deleting a test or not adding it. It tells the agent it can ask the user to allow the change. An edit's next step is to fix the code, or to stop and ask the user if the old test is wrong.
 - The user can allow a block. Only real user messages in the top-level session, written after that block, count. One question per blocked test, and a score of 0.5 or higher allows it. If that request fails, the block stands, like any other missing answer.
-- The user-intent question and the allow question are not the same. User intent asks if the user asked for this edit, from recent messages, before any block. Allow asks if the user allowed a block, from messages after it, for new tests and edits. Both allow at 0.5 and log it. Do not add a third.
-- Count blocks per top-level session, file, and test. A pass or an allow starts over. At three in a row, the next step tells the agent to stop retrying and ask the user. Keep at most 100 blocks per session and 100 sessions, in memory only.
+- The user-intent question and the allow question are not the same. User intent asks if the user asked for this edit, from recent messages, before any block. It covers test edits, check files, and commands, built by one helper. Allow asks if the user allowed a block, from messages after it, for every kind of block. Both allow at 0.5 and log it. Do not add a third.
+- Count blocks per top-level session, file, and test, per check file, and per command with its spaces collapsed. A pass or an allow starts over. At three in a row, the next step tells the agent to stop retrying and ask the user. Keep at most 100 blocks per session and 100 sessions, in memory only.
 - The setup and the code under test are context, not judged. Read them only from inside the project folder, never from `node_modules` or other test files. Tests use a fake disk.
 - Each question asks one thing, and yes means a problem. A question that needs the code under test is skipped when none was found. The exceptions are the user-intent, allow, and lifted-instruction questions, where a score of 0.5 or higher allows the edit or drops the note, and the two sentence questions, where 0.5 or higher on "limits" and below 0.5 on "style" makes a rule.
 - Use `jev-latest`. Do not pin a model version.
-- The first checks are tests, then instructions. Add later checks in `src/review.ts`. Do not rename the package for a new check.
+- The check-weakening check covers files that set what CI, tests, lint, type checks, or git hooks enforce (`isGatePath` in `src/subjects.ts`), from `write`, `edit`, and `apply_patch`, and `bash` commands. It asks one question per file or command: does it weaken or bypass a check. Like the test checks, it blocks when sure and notes from 0.5. Its next step is to keep the check and fix the code, or to stop and ask the user.
+- A missing key or an unreadable config skips the check-weakening check quietly. It never blocks a check file or a command. A TypeSafe failure allows it.
+- Strip comments from a check file only when its comment syntax is known. For others, send the text as it is. A long file sends only the changed lines and five lines around them.
+- `bash` is asked about only when the command names `git`, `pkg`, `set-script`, `HUSKY`, a test file or test folder, or a check file (`touchesGates` in `src/subjects.ts`). That is scope, like the test paths. Never block, note, or allow on a text match. Jev decides. Do not add pattern checks such as TODO text, `.only`, or `console.log`.
+- The last failed `bash` command is context only, never judged. It comes from `tool.execute.after`, where OpenCode puts the exit code in `metadata.exit`. A later pass of the same command forgets it. Keep one per top-level session, in memory only.
+- The first checks are tests, then instructions, then checks that CI and tests enforce. Add later checks in `src/review.ts`. Do not rename the package for a new check.
 - The published npm name is `jevy-vet`. Do not rename it. Install steps are in `README.md`.
 - OpenCode 1 only. Do not claim OpenCode 2 support. V2 needs `Plugin.define` and `setup()`, and a V1 function does not run there.
 - Do not edit the user's OpenCode config from this repo.

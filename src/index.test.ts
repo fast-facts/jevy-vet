@@ -422,4 +422,64 @@ describe('plugin', () => {
       expect(bodies.join('\n')).not.toContain('The user allowed it, go ahead.');
     });
   });
+  describe('changes that weaken a check', () => {
+    const skipLint = { filePath: '.github/workflows/ci.yml', oldString: '- run: bun run lint', newString: '- run: bun run lint || true' };
+    const bash = { tool: 'bash', sessionID: 's', callID: 'b' };
+
+    function judge(bodies: string[], score: number): FakeFetch {
+      return (_input, init) => {
+        const body = String(init?.body);
+        bodies.push(body);
+        return Promise.resolve(jsonResponse({ answers: { g0_weakens_gate: { type: 'noul', noul: score }, b0_weakens_gate: { type: 'noul', noul: score } } }));
+      };
+    }
+
+    test('blocks a bash command that skips a hook before it runs, and skips commands out of scope', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await expect(hooks['tool.execute.before'](bash, { args: { command: 'git commit --no-verify -m x', description: 'Commit' } }))
+          .rejects.toThrow('Jevy blocked this command.\n- bash, this command\n  Bypassed check');
+        await expect(hooks['tool.execute.before'](bash, { args: { command: 'ls -la', description: 'List' } })).resolves.toBeUndefined();
+      });
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toContain('git commit --no-verify -m x');
+    });
+
+    test('notes an unsure command in the output of the same call', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.6), async hooks => {
+        await expect(hooks['tool.execute.before'](bash, { args: { command: 'git config core.hooksPath /dev/null' } })).resolves.toBeUndefined();
+        const output = { title: '', output: '', metadata: { exit: 0 } };
+        await hooks['tool.execute.after']({ tool: 'bash', sessionID: 's', callID: 'b', args: { command: 'git config core.hooksPath /dev/null' } }, output);
+        expect(output.output).toStartWith('\n\nJevy note: this command ran, but it may weaken a check.');
+      });
+    });
+
+    test('sends the last failed command with a change to a check, and forgets it once that command passes', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.1), async hooks => {
+        await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+        const after = (sessionID: string, command: string, exit: unknown, output: string) => hooks['tool.execute.after']({ tool: 'bash', sessionID, callID: 'x', args: { command } }, { title: command, output, metadata: { exit } });
+        await after('child', 'bun run lint', 1, 'src/a.ts\n  1:7  error  no-unused-vars');
+        await before(hooks, 'edit', skipLint);
+        // A command that did not finish has no exit code and changes nothing.
+        await after('s', 'bun run lint', null, 'terminated');
+        await before(hooks, 'edit', skipLint);
+        await after('s', 'bun run lint', 0, 'ok');
+        await before(hooks, 'edit', skipLint);
+      });
+      const failures = bodies.map(body => (JSON.parse(body) as { state: { last_failure?: unknown } }).state.last_failure);
+      const failure = { command: 'bun run lint', output: 'src/a.ts\n  1:7  error  no-unused-vars' };
+      expect(failures).toEqual([failure, failure, undefined]);
+    });
+
+    test('does nothing for a check file or a command without a key', async () => {
+      const bodies: string[] = [];
+      await usingPlugin(undefined, judge(bodies, 0.9), async hooks => {
+        await expect(before(hooks, 'edit', skipLint)).resolves.toBeUndefined();
+        await expect(hooks['tool.execute.before'](bash, { args: { command: 'git commit --no-verify -m x' } })).resolves.toBeUndefined();
+      });
+      expect(bodies).toHaveLength(0);
+    });
+  });
 });

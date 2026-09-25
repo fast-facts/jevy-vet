@@ -375,3 +375,61 @@ export function changesFrom(tool: string, args: unknown, read: (path: string) =>
   }
   return changes;
 }
+
+// Files that set what CI, the tests, lint, type checks, and git hooks enforce.
+const GATE_FILES = new Set([
+  'package.json', 'bunfig.toml', 'deno.json', 'deno.jsonc', 'biome.json', 'biome.jsonc', '.eslintignore', '.nycrc', '.c8rc', 'codecov.yml',
+  '.gitlab-ci.yml', 'azure-pipelines.yml', 'bitbucket-pipelines.yml', 'Jenkinsfile', 'Makefile',
+  '.pre-commit-config.yaml', 'lefthook.yml', 'lefthook.yaml',
+  'pyproject.toml', 'setup.cfg', 'pytest.ini', 'tox.ini', '.coveragerc', 'mypy.ini', 'ruff.toml', '.ruff.toml', '.flake8',
+  '.golangci.yml', '.golangci.yaml', 'Cargo.toml', 'clippy.toml',
+]);
+const GATE_NAMES = [
+  /^tsconfig(?:\.[\w-]+)?\.json$/,
+  /^jsconfig\.json$/,
+  /^\.eslintrc(?:\.\w+)?$/,
+  /^eslint\.config\.[cm]?[jt]s$/,
+  /^(?:jest|vitest|vite|playwright|cypress)\.config\.[cm]?[jt]s$/,
+  /^vitest\.workspace\.[cm]?[jt]s$/,
+  /^\.mocharc(?:\.\w+)?$/,
+  /^karma\.conf\.[cm]?js$/,
+  /^\.nycrc\.\w+$/,
+  /^\.c8rc\.\w+$/,
+];
+const GATE_DIRS = /(?:^|\/)(?:\.github\/workflows|\.circleci|\.buildkite|\.husky)(?:\/|$)/;
+
+export function isGatePath(filePath: string): boolean {
+  const normalized = filePath.replaceAll('\\', '/');
+  const base = normalized.slice(normalized.lastIndexOf('/') + 1);
+  if (GATE_DIRS.test(normalized)) return true;
+  return GATE_FILES.has(base) || GATE_NAMES.some(name => name.test(base));
+}
+
+export interface Command {
+  command: string;
+  workdir?: string;
+}
+
+export function commandFrom(tool: string, args: unknown): Command | undefined {
+  if (tool !== 'bash' || !isRecord(args)) return;
+  const command = str(args, 'command') ?? '';
+  if (command.trim() === '') return;
+  const workdir = str(args, 'workdir');
+  return { command, ...(workdir ? { workdir } : {}) };
+}
+
+const TEST_DIRS = new Set(['tests', '__tests__', 'spec', 'e2e']);
+const GATE_WORDS = new Set(['git', 'pkg', 'set-script', 'HUSKY']);
+
+// Scope only, like isTestPath. Jev decides whether the command weakens a check.
+// A command that names none of those words, a test, or a check file is not asked about, so `ls` or `bun test` costs no call.
+export function touchesGates(command: string): boolean {
+  return command.split(/[\s'"`;&|<>()=]+/).some(word => {
+    const path = word.replace(/\/+$/, '');
+    if (path === '') return false;
+    const base = path.slice(path.lastIndexOf('/') + 1);
+    // `test` alone is a subcommand, as in `bun test`. As a folder it needs a slash.
+    const testDir = TEST_DIRS.has(base) || (base === 'test' && word.includes('/'));
+    return GATE_WORDS.has(path) || testDir || isGatePath(path) || isTestPath(path);
+  });
+}

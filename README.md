@@ -1,6 +1,6 @@
 # jevy-vet
 
-An OpenCode plugin that stops a weak test before the file is written, and tells the agent when an edit may break your instructions.
+An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check, and tells the agent when an edit may break your instructions.
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
@@ -49,7 +49,7 @@ Quit OpenCode and start it again. A session that is already open keeps the old c
 
 ## Which files
 
-It watches `write`, `edit`, and `apply_patch`. The test checks only look at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
+It watches `write`, `edit`, and `apply_patch`, and some `bash` commands. The test checks only look at paths that look like tests, such as `*.test.ts`, `*.spec.tsx`, `*_test.go`, `test_*.py`, `*Test.java`, and files under `__tests__/`.
 
 A file with more than one test is judged one test at a time. One bad test blocks the write.
 
@@ -94,13 +94,21 @@ Your own words allow the edit. The plugin keeps your last three messages for tha
 
 Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
 
+## Changes to checks
+
+This runs when an agent changes a file that sets what CI, the tests, lint, type checks, or git hooks enforce. That includes `.github/workflows/`, `package.json`, `bunfig.toml`, `tsconfig.json`, ESLint, Jest, and Vitest config, `.husky/`, and `pyproject.toml`. Jev is asked whether the change weakens or bypasses a check, for example by removing or skipping a step, adding `continue-on-error` or `|| true`, loosening a threshold, excluding files, or turning a rule off.
+
+It also runs before a `bash` command that names `git`, `pkg`, `set-script`, `HUSKY`, a test, or one of those files, such as `git commit --no-verify` or a `sed` edit to `tsconfig.json`. Other commands are not sent.
+
+When Jev is sure, the change or command is blocked. When it is not sure, it goes through with a note. If you asked for it, it is allowed, the same as a test edit. Jev also sees the last command that failed, as context. Without a key, this check does nothing.
+
 ## What the agent sees
 
 A block message lists each test: the file, the test, the rule it broke in one plain line, the lines that show it, and what to do next. Only lines that are really in the test are shown. At most five tests are listed. It never tells the agent to delete a test or to leave it out.
 
 It also tells the agent it can ask you. If you allow the change in a later message, the next try goes through. Only your messages after the block count, and a subagent's block is answered in the session you talk to.
 
-After three blocks in a row on the same test, the message tells the agent to stop retrying and ask you. A test that passes starts the count over.
+After three blocks in a row on the same test, file, or command, the message tells the agent to stop retrying and ask you. One that passes starts the count over.
 
 When Jev leans toward a problem but is not sure, the test is written and the same list is added to what the tool returns, as a note.
 
@@ -123,9 +131,9 @@ Rules that are only about formatting are left out. With no key, or when TypeSafe
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks, a score from 0.5 up to sure adds a note instead. The instruction check adds a note only when Jev is sure.
+For the test checks and changes to checks, a score from 0.5 up to sure adds a note instead. The instruction check adds a note only when Jev is sure.
 
-A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes are not.
+A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 
 ## What this does not do
 
