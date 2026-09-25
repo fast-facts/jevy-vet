@@ -516,4 +516,27 @@ describe('plugin', () => {
       expect(reuse?.state.existing?.map(item => item.path)).toEqual(['src/date.ts']);
     });
   });
+  describe('special-case check', () => {
+    test('finds the related test on disk and blocks the edit before it runs', async () => {
+      const project = withProject({
+        'src/price.ts': 'export function total(qty: number): number {\n  return qty * 5;\n}\n',
+        'tests/price.test.ts': 'import { total } from \'../src/price\';\n\ntest(\'totals\', () => {\n  expect(total(42)).toBe(210);\n});\n',
+      });
+      const bodies: { state: { changes?: { test_line?: string }[] } }[] = [];
+      const fetchImpl: FakeFetch = (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)) as { state: { changes?: { test_line?: string }[] } });
+        return Promise.resolve(jsonResponse({ answers: { h0_special_cases: { type: 'noul', noul: 0.9 } } }));
+      };
+      try {
+        await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+          const args = { filePath: join(project, 'src/price.ts'), oldString: '  return qty * 5;', newString: '  if (qty === 42) return 210;\n  return qty * 5;' };
+          await expect(before(hooks, 'edit', args)).rejects.toThrow('  special-cased: src/price.ts:2 if (qty === 42) return 210;\n  test: tests/price.test.ts:4 expect(total(42)).toBe(210);');
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]?.state.changes?.[0]?.test_line).toBe('tests/price.test.ts:4 expect(total(42)).toBe(210);');
+    });
+  });
 });

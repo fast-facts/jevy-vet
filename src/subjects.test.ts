@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { changesFrom, commandFrom, definitionsIn, editsFrom, isDefinitionFile, isGatePath, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
+import { changesFrom, commandFrom, definitionsIn, editsFrom, isDefinitionFile, isGatePath, isTestSupport, literalsIn, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
 describe('testFilesFrom', () => {
   test('splits a write into setup and one case per test', () => {
@@ -259,5 +259,35 @@ describe('definitionsIn', () => {
     expect(definitionsIn(text, 'src/A.java')).toEqual([]);
     expect(isDefinitionFile('src/a.mjs')).toBe(true);
     expect(isDefinitionFile('test_a.py')).toBe(false);
+  });
+});
+
+describe('literalsIn', () => {
+  test('finds strings and numbers with their lines, and skips imports, comments, and common numbers', () => {
+    const text = [
+      'import { a } from \'./a\';',
+      'const b = require("./b");',
+      '// 42 in a comment',
+      'if (qty === 42 && name === "Ada") return 210.5;',
+      'for (let i = 0; i < 10; i += 1) total -= 1;',
+      'const s = `hi ${name}`;',
+      'const t = \'x\' + \'7\' + v2 + 3.14;',
+      '\t"fmt"',
+    ].join('\n');
+    expect(literalsIn(text)).toEqual([
+      { value: 'Ada', line: 4 },
+      { value: '42', line: 4 },
+      { value: '210.5', line: 4 },
+      { value: '3.14', line: 7 },
+    ]);
+  });
+});
+
+describe('isTestSupport', () => {
+  test('matches tests, fixtures, mocks, and test helpers, by folder or name', () => {
+    for (const path of ['src/a.test.ts', 'test/helpers.ts', 'src/__mocks__/api.ts', 'src/__fixtures__/users.ts', 'conftest.py', 'src/testUtils.ts', 'src/test-helpers.js', 'src/fakeClock.ts', 'pkg/testdata/gen.go']) {
+      expect(isTestSupport(path)).toBe(true);
+    }
+    for (const path of ['src/price.ts', 'src/contest.ts', 'lib/pricing.py']) expect(isTestSupport(path)).toBe(false);
   });
 });

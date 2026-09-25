@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { isDefinitionFile, splitCases, type TestFile } from './subjects.ts';
+import { isCodeFile, isTestPath, splitCases, type TestFile } from './subjects.ts';
 
 // Context read from disk for one test file. None of it is judged.
 interface Source {
@@ -347,6 +347,7 @@ const GENERATED_MARK = /@generated|DO NOT EDIT/;
 const MAX_SOURCE_FILES = 2000;
 const MAX_LISTED_ENTRIES = 20_000;
 const MAX_SOURCE_FILE_CHARS = 200_000;
+const MAX_RELATED_TESTS = 10;
 
 export interface SourceFile {
   path: string;
@@ -354,6 +355,23 @@ export interface SourceFile {
 }
 
 export function sourceFiles(disk: Disk, skip: Set<string>): SourceFile[] {
+  return projectFiles(disk, path => !isTestPath(path) && !skip.has(join(disk.root, path)));
+}
+
+// Tests whose code under test, found the way contextFor finds it, includes this file.
+export function relatedTests(disk: Disk, sourcePath: string): SourceFile[] {
+  const target = resolve(disk.root, sourcePath);
+  const found: SourceFile[] = [];
+  for (const file of projectFiles(disk, isTestPath)) {
+    if (!candidates(file.path, file.text, disk).includes(target)) continue;
+    found.push(file);
+    if (found.length >= MAX_RELATED_TESTS) break;
+  }
+  return found;
+}
+
+// keep() gets the path relative to the root, so a test folder like __tests__ is seen.
+function projectFiles(disk: Disk, keep: (path: string) => boolean): SourceFile[] {
   const ignored = gitignored(disk);
   const found: SourceFile[] = [];
   const dirs = [''];
@@ -364,16 +382,16 @@ export function sourceFiles(disk: Disk, skip: Set<string>): SourceFile[] {
       listed += 1;
       const path = dir === '' ? name : `${dir}/${name}`;
       if (name.startsWith('.') || SKIP_DIRS.has(name) || ignored.some(pattern => pattern.test(path))) continue;
-      const full = join(disk.root, path);
-      if (isDefinitionFile(name)) {
-        if (skip.has(full) || GENERATED_NAME.test(name)) continue;
+      if (isCodeFile(name)) {
+        if (!keep(path) || GENERATED_NAME.test(name)) continue;
+        const full = join(disk.root, path);
         const text = disk.read(full);
         if (text === undefined || text.length > MAX_SOURCE_FILE_CHARS || GENERATED_MARK.test(text.slice(0, 500))) continue;
         found.push({ path: full, text });
         if (found.length >= MAX_SOURCE_FILES) break;
         continue;
       }
-      // No stat on Disk. A name that is not source is a folder. list() on a file is empty.
+      // No stat on Disk. A name that is not code is a folder. list() on a file is empty.
       dirs.push(path);
     }
   }

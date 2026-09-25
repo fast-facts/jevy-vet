@@ -1,6 +1,6 @@
 # jevy-vet
 
-An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check, and tells the agent when an edit may break your instructions or repeat code you already have.
+An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have.
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
@@ -102,6 +102,12 @@ It also runs before a `bash` command that names `git`, `pkg`, `set-script`, `HUS
 
 When Jev is sure, the change or command is blocked. When it is not sure, it goes through with a note. If you asked for it, it is allowed, the same as a test edit. Jev also sees the last command that failed, as context. Without a key, this check does nothing.
 
+## Code that fakes a test's answer
+
+When an agent changes a source file, the plugin looks for the tests of that file: tests that import it or are named after it. If a new line in the change uses a value that is also in one of those tests, such as `if (qty === 42) return 210`, or checks whether a test is running, Jev is asked whether the code hard-codes that test's answer instead of doing the real work. Other changes are not sent.
+
+When Jev is sure, the change is blocked. When it is not sure, it goes through with a note. Real constants and documented values are fine. Tests, fixtures, mocks, and test helpers are not checked. If you asked for a stub or a hard-coded value, it is allowed. Without a key, this check does nothing.
+
 ## What the agent sees
 
 A block message lists each test: the file, the test, the rule it broke in one plain line, the lines that show it, and what to do next. Only lines that are really in the test are shown. At most five tests are listed. It never tells the agent to delete a test or to leave it out.
@@ -137,7 +143,7 @@ If Jev is sure, a note tells the agent which function to reuse and where it is. 
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks and changes to checks, a score from 0.5 up to sure adds a note instead. The instruction and reuse checks add a note only when Jev is sure.
+For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction and reuse checks add a note only when Jev is sure.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 

@@ -184,7 +184,7 @@ export function titleOf(text: string): string | undefined {
   return java?.[1];
 }
 
-function isTestPath(filePath: string): boolean {
+export function isTestPath(filePath: string): boolean {
   const normalized = filePath.replaceAll('\\', '/');
   const base = normalized.slice(normalized.lastIndexOf('/') + 1);
   if (base === '') return false;
@@ -455,7 +455,12 @@ const DEFINITIONS = [
 const MAX_DEFINITION_LINES = 80;
 
 export function isDefinitionFile(filePath: string): boolean {
-  return DEFINITION_FILE.test(filePath) && !isTestPath(filePath);
+  return isCodeFile(filePath) && !isTestPath(filePath);
+}
+
+// Source or test, in a language definitionsIn reads.
+export function isCodeFile(filePath: string): boolean {
+  return DEFINITION_FILE.test(filePath);
 }
 
 // Each definition runs to the first later line indented no deeper, and includes a closing brace there.
@@ -482,6 +487,58 @@ export function definitionsIn(text: string, filePath: string): Definition[] {
       end += 1;
     }
     found.push({ name, line: i + 1, code: lines.slice(i, end).join('\n').trimEnd() });
+  }
+  return found;
+}
+
+// Helpers, fixtures, and mocks that tests use. Canned values belong there, so the special-case check skips them.
+// Takes a path relative to the project, so a project inside a folder named test is not skipped.
+const SUPPORT_DIRS = new Set([...TEST_DIRS, 'test', 'testing', 'fixtures', '__fixtures__', '__mocks__', 'mocks', 'testdata', 'testutil', 'testutils']);
+
+export function isTestSupport(filePath: string): boolean {
+  const parts = filePath.replaceAll('\\', '/').split('/');
+  const base = (parts.pop() ?? '').toLowerCase();
+  if (isTestPath(filePath) || parts.some(part => SUPPORT_DIRS.has(part))) return true;
+  if (base === 'conftest.py' || ['fixture', 'mock', 'stub', 'fake'].some(word => base.includes(word))) return true;
+  return /test[-_]?(?:utils?|helpers?|support)/.test(base);
+}
+
+export interface Literal {
+  // A string's text without quotes, or a number as written. '42' and 42 match.
+  value: string;
+  line: number;
+}
+
+const QUOTED = /(['"`])((?:\\.|(?!\1)[^\\\n])*)\1/g;
+const NUMBER = /(?<![\w.$])-?\d+(?:\.\d+)?(?![\w.])/g;
+// import, from, require, package, use, and a quoted path alone on a line (a Go import block).
+const IMPORT_LINE = [
+  /^\s*import\b/,
+  /^\s*from\s+\S+\s+import\b/,
+  /^\s*export\b.*\bfrom\s/,
+  /^\s*(?:const|let|var)\b.*\brequire\s*\(/,
+  /^\s*package\s/,
+  /^\s*use\s/,
+  /^\s*(?:[\w.]+\s+)?"[\w./-]+"\s*$/,
+];
+const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#)/;
+// Loop bounds and indexes more often than test data.
+const COMMON_NUMBERS = new Set(['0', '1', '2', '-1', '10', '100']);
+
+// ponytail: quotes and digits per line, not a lexer. A string over several lines, or a comment after code, is read roughly.
+export function literalsIn(text: string): Literal[] {
+  const found: Literal[] = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (IMPORT_LINE.some(pattern => pattern.test(line)) || COMMENT_LINE.test(line)) continue;
+    for (const match of line.matchAll(QUOTED)) {
+      const value = match[2] ?? '';
+      if (value.trim().length >= 2 && !value.includes('${')) found.push({ value, line: i + 1 });
+    }
+    for (const match of line.replace(QUOTED, '""').matchAll(NUMBER)) {
+      if (!COMMON_NUMBERS.has(match[0])) found.push({ value: match[0], line: i + 1 });
+    }
   }
   return found;
 }

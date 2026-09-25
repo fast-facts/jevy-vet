@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { contextFor, type Disk, headTail, instructionFilesFor, type InstructionPlaces, MAX_CODE_CHARS, MAX_CODE_FILE_CHARS, sentencesOf, sourceFiles } from './context.ts';
+import { contextFor, type Disk, headTail, instructionFilesFor, type InstructionPlaces, MAX_CODE_CHARS, MAX_CODE_FILE_CHARS, relatedTests, sentencesOf, sourceFiles } from './context.ts';
 import { type TestFile, testFilesFrom } from './subjects.ts';
 
 function disk(files: Record<string, string>, root = '/repo'): Disk & { reads: string[] } {
@@ -256,22 +256,22 @@ describe('sentencesOf', () => {
   });
 });
 
-describe('sourceFiles', () => {
-  // Lists folders as well as files, the way readdir does.
-  function tree(files: Record<string, string>): Disk {
-    return {
-      root: '/repo',
-      read: path => files[path],
-      list(dir) {
-        const names = new Set<string>();
-        for (const path of Object.keys(files)) {
-          if (path.startsWith(`${dir}/`)) names.add(path.slice(dir.length + 1).split('/')[0] ?? '');
-        }
-        return [...names];
-      },
-    };
-  }
+// Lists folders as well as files, the way readdir does.
+function tree(files: Record<string, string>): Disk {
+  return {
+    root: '/repo',
+    read: path => files[path],
+    list(dir) {
+      const names = new Set<string>();
+      for (const path of Object.keys(files)) {
+        if (path.startsWith(`${dir}/`)) names.add(path.slice(dir.length + 1).split('/')[0] ?? '');
+      }
+      return [...names];
+    },
+  };
+}
 
+describe('sourceFiles', () => {
   test('reads source files and skips tests, dot folders, installed, built, generated, ignored, and given files', () => {
     const code = 'export function a() {}';
     const files: Record<string, string> = {
@@ -279,6 +279,7 @@ describe('sourceFiles', () => {
       '/repo/src/a.ts': code,
       '/repo/src/deep/b.py': 'def b():\n    pass',
       '/repo/src/a.test.ts': code,
+      '/repo/src/__tests__/helper.ts': code,
       '/repo/src/changed.ts': code,
       '/repo/.git/x.ts': code,
       '/repo/node_modules/x/index.js': code,
@@ -306,5 +307,39 @@ describe('sourceFiles', () => {
 
   test('skips very large files', () => {
     expect(sourceFiles(tree({ '/repo/big.ts': 'x'.repeat(200_001), '/repo/ok.ts': 'x' }), new Set()).map(file => file.path)).toEqual(['/repo/ok.ts']);
+  });
+});
+
+describe('relatedTests', () => {
+  test('finds tests that import or are named for the file, the way contextFor maps a test to its code', () => {
+    const files: Record<string, string> = {
+      '/repo/src/price.ts': 'export function total() {}',
+      '/repo/src/price.test.ts': 'test(\'x\', () => {})',
+      '/repo/src/__tests__/price.ts': 'test(\'y\', () => {})',
+      '/repo/tests/cart.spec.ts': 'import { total } from \'../src/price.js\';',
+      '/repo/tests/other.test.ts': 'import { tax } from \'../src/tax\';',
+      '/repo/src/tax.ts': 'export function tax() {}',
+      '/repo/py/test_price.py': 'from price import total',
+      '/repo/py/price.py': 'def total():\n    pass',
+    };
+    expect(relatedTests(tree(files), 'src/price.ts').map(file => file.path).sort()).toEqual([
+      '/repo/src/__tests__/price.ts',
+      '/repo/src/price.test.ts',
+      '/repo/tests/cart.spec.ts',
+    ]);
+    expect(relatedTests(tree(files), '/repo/py/price.py').map(file => file.path)).toEqual(['/repo/py/test_price.py']);
+  });
+
+  test('skips installed and ignored tests, and stops at ten', () => {
+    const files: Record<string, string> = {
+      '/repo/.gitignore': 'old/\n',
+      '/repo/src/a.ts': 'export const a = 1',
+      '/repo/node_modules/x/a.test.ts': 'import { a } from \'../../src/a\';',
+      '/repo/old/a.test.ts': 'import { a } from \'../src/a\';',
+    };
+    for (let i = 0; i < 12; i += 1) files[`/repo/tests/a${i}.test.ts`] = 'import { a } from \'../src/a\';';
+    const found = relatedTests(tree(files), 'src/a.ts').map(file => file.path);
+    expect(found).toHaveLength(10);
+    expect(found.every(path => path.startsWith('/repo/tests/'))).toBe(true);
   });
 });
