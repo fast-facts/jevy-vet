@@ -49,8 +49,24 @@ function fromFile(filePath: string | undefined, text: string | undefined): Subje
 const ADD_FILE = '*** Add File:';
 const UPDATE_FILE = '*** Update File:';
 const MOVE_TO = '*** Move to:';
+const DELETE_FILE = '*** Delete File:';
 
 function subjectsFromPatch(patchText: string): Subject[] {
+  const subjects: Subject[] = [];
+  for (const file of patchFiles(patchText)) {
+    if (file.op === 'add') {
+      const text = file.rows.filter(row => row.startsWith('+')).map(row => row.slice(1)).join('\n');
+      addTest(subjects, file.path, text);
+      continue;
+    }
+    if (file.op !== 'update') continue;
+    const text = updatedText(file.rows);
+    if (text !== undefined) addTest(subjects, file.moveTo ?? file.path, text);
+  }
+  return subjects;
+}
+
+function patchLines(patchText: string): { lines: string[]; begin: number; end: number } | undefined {
   const trimmed = patchText.trim();
   // A pasted `cat <<EOF` wrapper is not part of the patch.
   const heredoc = trimmed.match(/^(?:cat\s+)?<<['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*$/);
@@ -58,40 +74,58 @@ function subjectsFromPatch(patchText: string): Subject[] {
   const lines = cleaned.split('\n');
   const begin = lines.findIndex(line => line.trim() === '*** Begin Patch');
   const end = lines.findIndex(line => line.trim() === '*** End Patch');
-  if (begin === -1 || end === -1 || begin >= end) return [];
-
-  const subjects: Subject[] = [];
-  let i = begin + 1;
-  while (i < end) {
-    const line = lines[i];
-    if (line.startsWith(ADD_FILE)) {
-      const hunk = linesUntilHeader(lines, i + 1, end);
-      const text = hunk.rows.filter(row => row.startsWith('+')).map(row => row.slice(1)).join('\n');
-      addTest(subjects, line.slice(ADD_FILE.length).trim(), text);
-      i = hunk.next;
-      continue;
-    }
-    if (line.startsWith(UPDATE_FILE)) {
-      i = addUpdatedFile(subjects, lines, i, end);
-      continue;
-    }
-    i += 1;
-  }
-  return subjects;
+  if (begin === -1 || end === -1 || begin >= end) return;
+  return { lines, begin, end };
 }
 
-function addUpdatedFile(subjects: Subject[], lines: string[], start: number, end: number): number {
-  let filePath = lines[start].slice(UPDATE_FILE.length).trim();
-  let i = start + 1;
-  if (i < end && lines[i].startsWith(MOVE_TO)) {
-    const moved = lines[i].slice(MOVE_TO.length).trim();
-    if (moved) filePath = moved;
-    i += 1;
+interface PatchFile {
+  op: 'add' | 'update' | 'delete';
+  path: string;
+  moveTo?: string;
+  rows: string[];
+}
+
+// New tests use the destination path. Edits use the old path.
+function patchFiles(patchText: string): PatchFile[] {
+  const patch = patchLines(patchText);
+  if (!patch) return [];
+  const { lines, begin, end } = patch;
+  const files: PatchFile[] = [];
+  for (let i = begin + 1; i < end;) {
+    const line = lines[i] ?? '';
+    let op: PatchFile['op'] | undefined;
+    let prefix = '';
+    if (line.startsWith(ADD_FILE)) {
+      op = 'add';
+      prefix = ADD_FILE;
+    } else if (line.startsWith(UPDATE_FILE)) {
+      op = 'update';
+      prefix = UPDATE_FILE;
+    } else if (line.startsWith(DELETE_FILE)) {
+      op = 'delete';
+      prefix = DELETE_FILE;
+    }
+    if (!op) {
+      i += 1;
+      continue;
+    }
+    const path = line.slice(prefix.length).trim();
+    let next = i + 1;
+    let moveTo = '';
+    if (op === 'update' && lines[next]?.startsWith(MOVE_TO)) {
+      moveTo = lines[next]?.slice(MOVE_TO.length).trim() ?? '';
+      next += 1;
+    }
+    if (op === 'delete') {
+      files.push({ op, path, rows: [] });
+      i = next;
+      continue;
+    }
+    const hunk = linesUntilHeader(lines, next, end);
+    files.push({ op, path, ...(moveTo ? { moveTo } : {}), rows: hunk.rows });
+    i = hunk.next;
   }
-  const hunk = linesUntilHeader(lines, i, end);
-  const text = updatedText(hunk.rows);
-  if (text !== undefined) addTest(subjects, filePath, text);
-  return hunk.next;
+  return files;
 }
 
 function updatedText(rows: string[]): string | undefined {
@@ -169,4 +203,131 @@ function str(record: Record<string, unknown>, key: string): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// One test that an edit changed or removed. Old text is contrast evidence only.
+// added: new tests with no old match, so a renamed test is not read as a removed one.
+export interface EditPair {
+  path: string;
+  title?: string;
+  old: string;
+  new: string;
+  added?: string;
+}
+
+// Old and new text of each changed test in an edit, a patch update or delete, or a write over a file on disk.
+// read(path) returns the test file as it is on disk now, if it can be read.
+export function editsFrom(tool: string, args: unknown, read: (path: string) => string | undefined): EditPair[] {
+  if (!isRecord(args)) return [];
+  if (tool === 'edit') {
+    const filePath = str(args, 'filePath') ?? '';
+    const oldText = str(args, 'oldString') ?? '';
+    const newText = str(args, 'newString') ?? '';
+    if (!isTestPath(filePath) || oldText.trim() === '') return [];
+    return pairCases(filePath, oldText, newText, () => read(filePath));
+  }
+  if (tool === 'write') {
+    const filePath = str(args, 'filePath') ?? '';
+    const content = str(args, 'content');
+    if (!isTestPath(filePath) || content === undefined) return [];
+    const onDisk = read(filePath);
+    return onDisk === undefined ? [] : pairCases(filePath, onDisk, content, () => onDisk);
+  }
+  if (tool !== 'apply_patch') return [];
+  const pairs: EditPair[] = [];
+  for (const file of patchFiles(str(args, 'patchText') ?? '')) {
+    // A move only changes where the new text goes. The old tests live at this path.
+    if (!isTestPath(file.path)) continue;
+    if (file.op === 'delete') {
+      const onDisk = read(file.path);
+      if (onDisk !== undefined) pairs.push(...pairCases(file.path, onDisk, '', () => onDisk));
+      continue;
+    }
+    if (file.op !== 'update') continue;
+    for (const rows of splitHunks(file.rows)) {
+      if (!rows.some(row => row.startsWith('-'))) continue;
+      const oldText = rows.filter(row => !row.startsWith('+')).map(row => row.slice(1)).join('\n');
+      const newText = rows.filter(row => !row.startsWith('-')).map(row => row.slice(1)).join('\n');
+      pairs.push(...pairCases(file.path, oldText, newText, () => read(file.path)));
+    }
+  }
+  return pairs;
+}
+
+function splitHunks(rows: string[]): string[][] {
+  const hunks: string[][] = [[]];
+  for (const row of rows) {
+    if (row.startsWith('@@')) hunks.push([]);
+    // A blank hunk line is a context line. Its leading space is already gone.
+    else if (/^[ +-]/.test(row) || row === '') hunks[hunks.length - 1]?.push(row === '' ? ' ' : row);
+  }
+  return hunks.filter(hunk => hunk.length > 0);
+}
+
+// Pair old and new tests by title. Text without test markers is one pair, titled from the file on disk.
+function pairCases(filePath: string, oldText: string, newText: string, readDisk: () => string | undefined): EditPair[] {
+  const oldCases = splitCases(oldText).cases;
+  const newCases = splitCases(newText).cases;
+  const titled = (cases: string[]) => cases.length > 0 && cases.every(item => titleOf(item) !== undefined);
+  if (titled(oldCases) && (newCases.length === 0 || titled(newCases))) {
+    const byTitle = new Map(newCases.map(item => [titleOf(item), item]));
+    const oldTitles = new Set(oldCases.map(item => titleOf(item)));
+    const added = newCases.filter(item => !oldTitles.has(titleOf(item))).join('\n\n');
+    const pairs: EditPair[] = [];
+    for (const before of oldCases) {
+      const title = titleOf(before);
+      const after = byTitle.get(title) ?? '';
+      if (sameCode(before, after, filePath)) continue;
+      pairs.push({ path: filePath, title, old: before, new: after, ...(after === '' && added !== '' ? { added } : {}) });
+    }
+    return pairs;
+  }
+  if (sameCode(oldText, newText, filePath)) return [];
+  const firstLine = oldText.split('\n').map(line => line.trim()).find(line => line !== '') ?? '';
+  const disk = readDisk();
+  const around = disk === undefined ? undefined : splitCases(disk).cases.find(item => item.includes(firstLine));
+  const title = around === undefined ? undefined : titleOf(around);
+  return [{ path: filePath, ...(title ? { title } : {}), old: oldText.trim(), new: newText.trim() }];
+}
+
+function sameCode(a: string, b: string, filePath: string): boolean {
+  const flat = (text: string) => stripComments(text, filePath).replace(/\s+/g, '');
+  return flat(a) === flat(b);
+}
+
+// Agents explain a weakened check in a comment. Jev judges the code, not the excuse.
+// ponytail: not a parser. A comment marker inside a regex literal is treated as a comment.
+export function stripComments(text: string, filePath: string): string {
+  const hash = /\.py$/.test(filePath);
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i] ?? '';
+    if (quote) {
+      out += char;
+      if (char === '\\') {
+        out += text[i + 1] ?? '';
+        i += 1;
+      } else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === '\'' || (char === '`' && !hash)) {
+      quote = char;
+      out += char;
+      continue;
+    }
+    const lineComment = hash ? char === '#' : char === '/' && text[i + 1] === '/';
+    if (lineComment) {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (!hash && char === '/' && text[i + 1] === '*') {
+      const close = text.indexOf('*/', i + 2);
+      i = close === -1 ? text.length : close + 1;
+      continue;
+    }
+    out += char;
+  }
+  return out.split('\n').map(line => line.trimEnd()).filter((line, n, all) => line !== '' || (n > 0 && all[n - 1] !== '')).join('\n').trim();
 }

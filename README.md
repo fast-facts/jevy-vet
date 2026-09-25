@@ -20,11 +20,19 @@ It blocks the write when Jev is sure a test fails one of these rules:
 
 Along with each test, Jev sees the rest of the test file's setup (imports and helpers) and the code under test. The plugin reads that code from the project folder. It follows relative imports in the test file and looks for the usual source file next to it: `foo.test.ts` → `foo.ts`, `__tests__/foo.ts` → `foo.ts`, `test_foo.py` → `foo.py`, a Go test's own package, and `src/test/…/FooTest.java` → `src/main/…/Foo.java`. It does not read outside the project folder, in `node_modules`, or other test files. A large file is cut to the imported definitions, or to its head and tail. If no code under test is found, the last three rules are not asked.
 
-Only the new test text is judged.
+Only the new test text is judged by these rules.
+
+### Test edits
+
+When an agent changes an existing test, with `edit`, a patch update or delete, or a `write` over a test file that is already on disk, comments are removed and the old check is compared with the new one.
+
+The edit is blocked when Jev is sure the check got weaker, was inverted or removed, has a changed expected value, or a test was removed without a replacement. A stronger check, the same check written differently, or a change that does not touch the check, is allowed. The message shows the old and new check, and tells the agent to fix the code, or to stop and ask you if the old test is wrong.
+
+If you asked for the change, it is allowed. The plugin keeps your last three messages in each session, in memory only, and sends them with a test edit so Jev can tell. Asking to fix a failure or to make the tests pass does not count. A subagent's prompt is written by another agent, so it never counts.
 
 A score below 0.8 is allowed. If Jev is unsure, the write is allowed. If TypeSafe is down, the write is allowed. If the config file is missing, unreadable, or has no `TYPESAFE_API_KEY`, the test write is blocked.
 
-It does not prove the test would catch a real bug. That needs a run, and for a stronger check, mutation testing. This plugin only reads the new test text and the code around it.
+It does not prove the test would catch a real bug. That needs a run, and for a stronger check, mutation testing. This plugin only reads the test text, the code around it, and, for an edit, your recent messages.
 
 ## Add it to OpenCode
 

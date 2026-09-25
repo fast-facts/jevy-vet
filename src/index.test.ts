@@ -113,10 +113,11 @@ describe('plugin', () => {
     });
     expect(url).toBe('https://jev.example/v1/systemone');
     expect(auth).toBe('Bearer ts_secret');
-    expect(bodies).toHaveLength(3);
+    // write, edit (new-test request and edit request), apply_patch.
+    expect(bodies).toHaveLength(4);
     expect(bodies.join('\n')).toContain('src/bad.test.ts');
     expect(bodies.join('\n')).not.toContain('ts_secret');
-    expect(bodies.join('\n')).not.toContain('OLD_NOT_JUDGED');
+    expect(bodies.filter(body => body.includes('"files"')).join('\n')).not.toContain('OLD_NOT_JUDGED');
   });
 
   test('allows a passing test and skips a non-test write', async () => {
@@ -204,6 +205,36 @@ describe('plugin', () => {
       { path: 'src/math.ts', text: 'export function add(a: number, b: number) { return a + b }', truncated: false },
     ]);
     expect(body).not.toContain('export const SECRET_OUTSIDE');
+  });
+
+  test('sends the user\'s latest real messages with a test edit, but not a subagent\'s prompt', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'jevy-vet-project-'));
+    const bodies: string[] = [];
+    const fetchImpl: FakeFetch = (_input, init) => {
+      bodies.push(String(init?.body));
+      return Promise.resolve(jsonResponse({ answers: {} }));
+    };
+    const edit = { filePath: join(project, 'a.test.ts'), oldString: 'expect(add(1, 2)).toBe(3)', newString: 'expect(add(1, 2)).toBe(4)' };
+    const editBodies = () => bodies.filter(body => body.includes('"edits"')).map(body => JSON.parse(body) as { state: { user_messages?: string[] } });
+    try {
+      writeFileSync(join(project, 'a.test.ts'), 'test(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})');
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+        for (const text of ['one', 'two', 'three', 'Change add so 1 + 2 is 4.']) {
+          await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text }, { type: 'text', text: 'hint', synthetic: true }, { type: 'text', text: 'IGNORED_PART', ignored: true }, { type: 'file', text: 'FILE_PART' }] });
+        }
+        await hooks['chat.message']({ sessionID: 'child' }, { parts: [{ type: 'text', text: 'Update the expected value.' }] });
+        await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+        await before(hooks, 'edit', edit);
+        await hooks['tool.execute.before']({ tool: 'edit', sessionID: 'child' }, { args: edit });
+        await hooks['tool.execute.before']({ tool: 'edit', sessionID: 'other' }, { args: edit });
+      }, undefined, project);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+    expect(editBodies().map(body => body.state.user_messages)).toEqual([['two', 'three', 'Change add so 1 + 2 is 4.'], undefined, undefined]);
+    expect(bodies.join('\n')).not.toContain('hint');
+    expect(bodies.join('\n')).not.toContain('IGNORED_PART');
+    expect(bodies.join('\n')).not.toContain('FILE_PART');
   });
 
   test('still allows the write when logging fails', async () => {

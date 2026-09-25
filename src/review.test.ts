@@ -340,7 +340,7 @@ describe('review', () => {
   });
 
   test('reads setup and imports from the file on disk for an edit, but judges only newString', async () => {
-    let body = '';
+    const bodies: string[] = [];
     const onDisk = ['import { add } from \'./math\';', 'test(\'old\', () => { expect(add(2, 2)).toBe(4) })'].join('\n');
     const { disk } = memoryDisk({
       '/repo/src/math.test.ts': onDisk,
@@ -351,9 +351,11 @@ describe('review', () => {
       oldString: 'OLD_NOT_JUDGED',
       newString: 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })',
     }, deps((_url, init) => {
-      body = String(init?.body);
+      bodies.push(String(init?.body));
       return Promise.resolve(jsonResponse(allowBody()));
     }, { key: 'ts_secret' }, disk));
+    // The edit check gets its own request with the old text as contrast. The new-test request never has it.
+    const body = bodies.find(item => item.includes('"files"')) ?? '';
     const parsed = JSON.parse(body) as SentBody;
     const file = parsed.state.files[0];
     expect(file.setup).toBe('import { add } from \'./math\';');
@@ -408,5 +410,124 @@ describe('review', () => {
       if (called) judged.push(filePath);
     }
     expect(judged).toEqual(['a.test.ts', 'a.spec.tsx', 'a.test.mjs', 'foo_test.go', 'foo_test.rs', 'foo_test.exs', 'foo_test.py', 'test_foo.py', 'FooTest.java', 'FooTest.kt', 'src/__tests__/foo.ts']);
+  });
+
+  describe('test edits', () => {
+    const onDisk = 'import { add } from \'./add\';\ntest(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})';
+    const weaken = { filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: '// the sum is flaky\nexpect(add(1, 2)).toBeDefined()' };
+
+    interface EditBody {
+      state: { purpose: string; user_messages?: string[]; edits: { path: string; title?: string; old: string; new: string; added?: string }[] };
+      questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }>;
+    }
+
+    function editRun(args: unknown, answers: Record<string, unknown>, userMessages?: string[], tool = 'edit') {
+      const bodies: string[] = [];
+      const { disk } = memoryDisk({ '/repo/a.test.ts': onDisk });
+      const used = deps((_url, init) => {
+        bodies.push(String(init?.body));
+        return Promise.resolve(jsonResponse({ answers }));
+      }, { key: 'ts_secret' }, disk);
+      used.userMessages = userMessages;
+      return {
+        used,
+        result: review(tool, args, used),
+        edit: () => JSON.parse(bodies.find(body => body.includes('"edits"')) ?? '{}') as EditBody,
+      };
+    }
+
+    const sure = (choice: string) => ({ type: 'choice', choice, probabilities: { [choice]: 0.92 }, confidence: 0.9 });
+
+    test('sends old and new without comments and asks a choice and a removal question', async () => {
+      const run = editRun(weaken, {});
+      expect(await run.result).toBeUndefined();
+      const body = run.edit();
+      expect(body.state.edits).toEqual([{ path: '/repo/a.test.ts', title: 'adds', old: 'expect(add(1, 2)).toBe(3)', new: 'expect(add(1, 2)).toBeDefined()' }]);
+      expect(body.state.user_messages).toBeUndefined();
+      expect(Object.keys(body.questions).sort()).toEqual(['e0_change', 'e0_removes_test']);
+      expect(body.questions.e0_change.type).toBe('choice');
+      expect(Object.keys(body.questions.e0_change.criteria)).toEqual(['stronger', 'equivalent', 'weaker', 'inverted_or_removed', 'changed_value', 'unrelated']);
+      expect(body.questions.e0_change.instructions).toContain('`edits[0].old`');
+      expect(body.questions.e0_removes_test.type).toBe('noul');
+      expect(JSON.stringify(body)).not.toContain('flaky');
+    });
+
+    test('blocks a sure weaker change and shows the old and new check', async () => {
+      const result = await editRun(weaken, { e0_change: sure('weaker') }).result;
+      expect(result).toBe([
+        'Jevy blocked this test edit.',
+        '/repo/a.test.ts (test "adds"): The new check is weaker than the old one.',
+        '  was: expect(add(1, 2)).toBe(3)',
+        '  now: expect(add(1, 2)).toBeDefined()',
+        'Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.',
+      ].join('\n'));
+      expect(result).not.toMatch(/delete|remove the test/i);
+    });
+
+    test('blocks inverted or removed checks, changed values, and removed tests', async () => {
+      expect(await editRun(weaken, { e0_change: sure('inverted_or_removed') }).result).toContain('A check was inverted, removed, or disabled.');
+      expect(await editRun(weaken, { e0_change: sure('changed_value') }).result).toContain('The expected value changed.');
+      expect(await editRun(weaken, { e0_change: { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.92 } } }).result).toContain('The new check is weaker than the old one.');
+      const removed = await editRun({ filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: '' }, { e0_removes_test: { type: 'noul', noul: 0.9 } }).result;
+      expect(removed).toContain('It removes or disables a test without an equivalent replacement.');
+      expect(removed).toContain('  now: (removed)');
+    });
+
+    test('allows stronger, equivalent, and unrelated changes, and unsure answers', async () => {
+      for (const choice of ['stronger', 'equivalent', 'unrelated']) {
+        expect(await editRun(weaken, { e0_change: sure(choice) }).result).toBeUndefined();
+      }
+      const lowProbability = { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.6, equivalent: 0.4 }, confidence: 0.9 };
+      const lowConfidence = { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.85 }, confidence: 0.5 };
+      expect(await editRun(weaken, { e0_change: lowProbability }).result).toBeUndefined();
+      expect(await editRun(weaken, { e0_change: lowConfidence }).result).toBeUndefined();
+      expect(await editRun(weaken, { e0_removes_test: { noul: 0.79 } }).result).toBeUndefined();
+    });
+
+    test('allows the change when the user asked for it', async () => {
+      const run = editRun(weaken, { e0_change: sure('changed_value'), e0_user_asked: { type: 'noul', noul: 0.7 } }, ['The spec changed: add(1, 2) no longer has to be exact.']);
+      expect(await run.result).toBeUndefined();
+      expect(await editRun(weaken, { e0_change: sure('weaker'), e0_user_asked: { type: 'noul', noul: 0.5 } }, ['Loosen this check.']).result).toBeUndefined();
+      const body = run.edit();
+      expect(body.state.user_messages).toEqual(['The spec changed: add(1, 2) no longer has to be exact.']);
+      expect(body.questions.e0_user_asked.instructions).toContain('`user_messages`');
+      expect(body.questions.e0_user_asked.criteria.false).toContain('make the tests pass does not count');
+      expect(run.used.logs).toEqual(['/repo/a.test.ts: the user asked for this test change. The edit was allowed.']);
+    });
+
+    test('still blocks when the user did not ask for it', async () => {
+      const run = editRun(weaken, { e0_change: sure('weaker'), e0_user_asked: { type: 'noul', noul: 0.2 } }, ['Make the tests pass.']);
+      expect(await run.result).toContain('The new check is weaker than the old one.');
+      expect(await editRun(weaken, { e0_change: sure('weaker'), e0_user_asked: { type: 'noul', noul: 0.49 } }, ['Make the tests pass.']).result).toContain('The new check is weaker than the old one.');
+    });
+
+    test('compares a write with the file on disk', async () => {
+      const content = 'import { add } from \'./add\';\ntest(\'adds\', () => {\n  expect(add(1, 2)).toBe(4)\n})';
+      const run = editRun({ filePath: '/repo/a.test.ts', content }, { e0_change: sure('changed_value') }, undefined, 'write');
+      const result = await run.result;
+      expect(run.edit().state.edits[0]?.old).toContain('toBe(3)');
+      expect(result).toContain('/repo/a.test.ts (test "adds"): The expected value changed.');
+      expect(result).toContain('  was: expect(add(1, 2)).toBe(3)');
+      expect(result).toContain('  now: expect(add(1, 2)).toBe(4)');
+    });
+
+    test('names both checks when a new test and an edit both fail', async () => {
+      const result = await editRun(weaken, { e0_change: sure('weaker'), t0_passes_on_empty: { noul: 0.95 } }).result;
+      expect(result).toContain('Jevy blocked this test write.');
+      expect(result).toContain('Jevy blocked this test edit.');
+    });
+
+    test('allows the edit when TypeSafe fails, and logs once', async () => {
+      const { disk } = memoryDisk({ '/repo/a.test.ts': onDisk });
+      const used = deps(() => Promise.resolve(jsonResponse({ error: 'down' }, 503)), { key: 'ts_secret' }, disk);
+      expect(await review('edit', weaken, used)).toBeUndefined();
+      expect(used.logs).toEqual(['TypeSafe returned 503. The test write was allowed.']);
+    });
+
+    test('blocks an edit to a test when the key is missing', async () => {
+      const result = await review('write', { filePath: 'a.test.ts', content: '' }, deps(() => Promise.resolve(jsonResponse({})), { key: '' }, memoryDisk({ '/repo/a.test.ts': onDisk }).disk));
+      expect(result).toContain('TYPESAFE_API_KEY is not set');
+      expect(result).toContain('a.test.ts');
+    });
   });
 });
