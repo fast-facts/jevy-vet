@@ -21,6 +21,7 @@
   "homepage": "https://github.com/fast-facts/jevy-vet#readme",
   "scripts": {
     "test": "bun test",
+    "smoke": "bun scripts/smoke.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },

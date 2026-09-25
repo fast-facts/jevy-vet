@@ -181,6 +181,7 @@ It can be wrong about your instructions, either way. It does not undo the edit.
 
 ```bash
 bun test
+bun run smoke
 ```
 
-The tests do not need an API key.
+The tests do not need an API key. `bun run smoke` runs the plugin inside OpenCode, against fake servers only. It skips if `opencode` is not installed. GitHub Actions installs OpenCode 1.x and runs it.

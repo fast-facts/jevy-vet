@@ -1,0 +1,32 @@
+name: Smoke on PR
+
+on:
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.base_ref }}
+
+jobs:
+  run:
+    name: Smoke on PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1
+
+      - name: Install OpenCode 1.x
+        run: curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.32 --no-modify-path
+
+      - name: Run smoke
+        run: |
+          set -o pipefail
+          opencode --version | grep -q '^1\.'
+          bun run smoke | tee smoke.log
+          ! grep -q 'Smoke test skipped' smoke.log
