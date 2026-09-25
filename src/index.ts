@@ -1,8 +1,8 @@
 import { homedir } from 'node:os';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { type Block, checkInstructions, checkReuse, type Failure, review } from './review.ts';
+import { type Block, checkClaims, checkInstructions, checkReuse, type Failure, review, shownPath, type Step } from './review.ts';
 import { loadSettings } from './settings.ts';
-import { commandFrom } from './subjects.ts';
+import { changesFrom, commandFrom } from './subjects.ts';
 
 interface Input {
   // The project folder. OpenCode passes it. The code under test is only read from inside it.
@@ -19,7 +19,21 @@ interface Input {
         };
       }): Promise<unknown>;
     };
+    // Optional. A host without these skips the claim check.
+    session?: {
+      messages(options: { path: { id: string }; query: { limit: number } }): Promise<{ data?: SessionMessage[] }>;
+      promptAsync(options: { path: { id: string }; body: { agent: string; model?: { providerID: string; modelID: string }; parts: { type: 'text'; text: string; synthetic: boolean }[] } }): Promise<unknown>;
+    };
+    tui?: {
+      showToast(options: { body: { title: string; message: string; variant: 'info' | 'warning' } }): Promise<unknown>;
+    };
   };
+}
+
+// The parts of a session message from the SDK's session.messages that the claim check reads.
+interface SessionMessage {
+  info: { role: string; agent?: string; model?: { providerID: string; modelID: string }; error?: unknown };
+  parts: { type: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
 }
 
 // The parts of OpenCode's chat.message output this plugin reads.
@@ -29,7 +43,7 @@ interface ChatMessage {
 
 interface PluginEvent {
   type: string;
-  properties?: { info?: { id?: string; parentID?: string } };
+  properties?: { info?: { id?: string; parentID?: string }; sessionID?: string; status?: { type?: string } };
 }
 
 const KEEP_MESSAGES = 3;
@@ -38,8 +52,13 @@ const MAX_FAILURE_CHARS = 4000;
 const KEEP_SESSIONS = 100;
 // Checks started before a tool runs and not yet collected after it. A failed tool never collects.
 const KEEP_PENDING = 50;
+const KEEP_STEPS = 30;
+const MAX_STEP_OUTPUT_CHARS = 1000;
+// Enough to find the last user message behind a long run of tool steps.
+const READ_MESSAGES = 50;
 
-// Blocks useless test writes and changes that weaken a check, notes unsure ones, edits that may break the user's instructions, and new code that repeats existing code, by calling TypeSafe directly.
+// Blocks useless test writes and changes that weaken a check, notes unsure ones, edits that may break the user's instructions, and new code that repeats existing code,
+// and checks the agent's final message against what it did when the session goes idle, by calling TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
@@ -60,6 +79,10 @@ export default async function jevyVet(input: Input) {
   let configured: string[] = [];
   const sentences = new Map<string, boolean>();
   const pending = new Map<string, Promise<string | undefined>>();
+  // Commands and edits per top-level session since the user's last message, for the claim check.
+  const steps = new Map<string, Step[]>();
+  // messageCount when each session was last checked. One check per user message.
+  const checked = new Map<string, number>();
   const disk = { root, read: readSource, list: listDir };
   // The user of a subagent session is the user of the session that started it.
   const topOf = (session: string) => {
@@ -80,6 +103,51 @@ export default async function jevyVet(input: Input) {
       return;
     }
   };
+  const load = () => loadSettings(process.env, homedir());
+  const remember = <T>(map: Map<string, T>, key: string, value: T) => {
+    // Delete first so this session moves to the end.
+    map.delete(key);
+    map.set(key, value);
+    if (map.size > KEEP_SESSIONS) {
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) map.delete(oldest);
+    }
+  };
+  const record = (session: string, step: Step) => remember(steps, session, [...steps.get(session) ?? [], step].slice(-KEEP_STEPS));
+  const checkTurn = async (session: string) => {
+    // A subagent reports to its parent agent, not to the user.
+    if (parents.has(session)) return;
+    const count = counts.get(session) ?? 0;
+    // The follow-up is synthetic, so it adds no user message, and the idle after it is skipped here.
+    if (count === 0 || checked.get(session) === count) return;
+    // Mark before the await. The follow-up can go idle while this check is still running.
+    remember(checked, session, count);
+    const history = (await input.client.session?.messages({ path: { id: session }, query: { limit: READ_MESSAGES } }))?.data ?? [];
+    const last = history.at(-1);
+    const user = history.filter(item => item.info.role === 'user').at(-1);
+    // An aborted or failed turn has no final message to check.
+    if (last?.info.role !== 'assistant' || last.info.error) return;
+    // A user message that is all synthetic is a plugin's own prompt.
+    if (!user || user.parts.every(part => part.synthetic)) return;
+    const text = last.parts
+      .filter(part => part.type === 'text' && !part.synthetic && !part.ignored)
+      .map(part => part.text ?? '')
+      .join('\n')
+      .trim();
+    if (text === '') return;
+    const found = await checkClaims(text, { load, fetch: globalThis.fetch, log, userMessages: messages.get(session) ?? [], steps: steps.get(session) ?? [] });
+    // A newer user message starts a new turn, and the finding is stale.
+    if (!found || (counts.get(session) ?? 0) !== count) return;
+    // Same agent and model as the user's turn, so a plan-only agent is not switched to one that edits.
+    const agent = user.info.agent;
+    if (found.followUp && agent) {
+      await input.client.session?.promptAsync({
+        path: { id: session },
+        body: { agent, ...(user.info.model ? { model: user.info.model } : {}), parts: [{ type: 'text', text: found.followUp, synthetic: true }] },
+      });
+    }
+    await input.client.tui?.showToast({ body: { title: 'Jevy', message: found.note, variant: found.followUp ? 'info' : 'warning' } });
+  };
   return {
     config: (config: { instructions?: unknown }) => {
       configured = Array.isArray(config.instructions) ? config.instructions.filter((item: unknown): item is string => typeof item === 'string') : [];
@@ -92,6 +160,12 @@ export default async function jevyVet(input: Input) {
       if (parents.size > KEEP_SESSIONS * 10) {
         const oldest = parents.keys().next().value;
         if (oldest !== undefined) parents.delete(oldest);
+      }
+      // session.idle is deprecated in OpenCode. session.status with an idle status is sent at the same time.
+      const session = event.properties?.sessionID;
+      if (event.type === 'session.status' && event.properties?.status?.type === 'idle' && session) {
+        // OpenCode does not await plugin events. A failed check must not reject.
+        return checkTurn(session).catch(() => undefined);
       }
       return Promise.resolve();
     },
@@ -107,6 +181,8 @@ export default async function jevyVet(input: Input) {
       messages.delete(hook.sessionID);
       messages.set(hook.sessionID, kept);
       counts.set(hook.sessionID, (counts.get(hook.sessionID) ?? 0) + 1);
+      // A new turn. Steps before it do not back a claim made after it.
+      if (!parents.has(hook.sessionID)) steps.delete(hook.sessionID);
       if (messages.size > KEEP_SESSIONS) {
         const oldest = messages.keys().next().value;
         if (oldest !== undefined) {
@@ -119,7 +195,7 @@ export default async function jevyVet(input: Input) {
     'tool.execute.before': async (hook: { tool: string; sessionID?: string; callID?: string }, output: { args: unknown }) => {
       const session = hook.sessionID ?? '';
       const shared = {
-        load: () => loadSettings(process.env, homedir()),
+        load,
         fetch: globalThis.fetch,
         disk,
         log,
@@ -164,20 +240,18 @@ export default async function jevyVet(input: Input) {
     },
     // OpenCode returns this same output object to the model, so an appended note reaches the agent.
     'tool.execute.after': async (hook: { tool: string; sessionID: string; callID: string; args: unknown }, output: { title: string; output: string; metadata: unknown }) => {
+      const top = topOf(hook.sessionID);
       const run = commandFrom(hook.tool, hook.args);
       // OpenCode's bash tool returns a failed command as output, with the exit code in metadata.
       const exit = typeof output.metadata === 'object' && output.metadata !== null && 'exit' in output.metadata ? output.metadata.exit : undefined;
       if (run && typeof exit === 'number') {
-        const top = topOf(hook.sessionID);
-        if (exit !== 0) {
-          failures.delete(top);
-          failures.set(top, { command: run.command, output: headTail(output.output, MAX_FAILURE_CHARS).text });
-          if (failures.size > KEEP_SESSIONS) {
-            const oldest = failures.keys().next().value;
-            if (oldest !== undefined) failures.delete(oldest);
-          }
-        } else if (failures.get(top)?.command === run.command) failures.delete(top);
+        if (exit !== 0) remember(failures, top, { command: run.command, output: headTail(output.output, MAX_FAILURE_CHARS).text });
+        else if (failures.get(top)?.command === run.command) failures.delete(top);
+        record(top, { command: run.command, exit, output: headTail(output.output, MAX_STEP_OUTPUT_CHARS).text });
       }
+      // Paths only. Old file text is not part of a claim step, so do not read the disk.
+      const edited = changesFrom(hook.tool, hook.args, () => undefined).map(change => shownPath(root, change.path));
+      if (edited.length > 0) record(top, { edited });
       const check = pending.get(hook.callID);
       if (!check) return;
       pending.delete(hook.callID);

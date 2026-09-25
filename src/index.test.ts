@@ -37,6 +37,7 @@ async function usingPlugin(
   run: (hooks: Hooks) => Promise<void>,
   log: PluginLog = () => Promise.resolve(undefined),
   directory?: string,
+  client: Omit<Parameters<typeof plugin>[0]['client'], 'app'> = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'jevy-vet-'));
   const savedXdg = process.env.XDG_CONFIG_HOME;
@@ -52,7 +53,7 @@ async function usingPlugin(
   }
   globalThis.fetch = fetchImpl as typeof fetch;
   try {
-    await run(await plugin({ directory: directory ?? join(root, 'project'), client: { app: { log } } }));
+    await run(await plugin({ directory: directory ?? join(root, 'project'), client: { app: { log }, ...client } }));
   } finally {
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdg;
@@ -537,6 +538,167 @@ describe('plugin', () => {
       }
       expect(bodies).toHaveLength(1);
       expect(bodies[0]?.state.changes?.[0]?.test_line).toBe('tests/price.test.ts:4 expect(total(42)).toBe(210);');
+    });
+  });
+  describe('claim check', () => {
+    interface Message {
+      info: { role: string; agent?: string; model?: { providerID: string; modelID: string }; error?: unknown };
+      parts: { type: string; text?: string; synthetic?: boolean }[];
+    }
+    const MODEL = { providerID: 'anthropic', modelID: 'claude' };
+    const user: Message = { info: { role: 'user', agent: 'build', model: MODEL }, parts: [{ type: 'text', text: 'Fix the price bug.' }] };
+    const done: Message = { info: { role: 'assistant' }, parts: [{ type: 'text', text: 'All tests pass now.' }] };
+    const idle = (sessionID: string) => ({ event: { type: 'session.status', properties: { sessionID, status: { type: 'idle' } } } });
+    const failedRun = { c0_support: { type: 'choice', choice: 'failed_run', probabilities: { failed_run: 0.95 }, confidence: 0.9 } };
+
+    interface Fakes {
+      reads: string[];
+      prompts: { path: { id: string }; body: { agent: string; model?: { providerID: string; modelID: string }; parts: { type: 'text'; text: string; synthetic: boolean }[] } }[];
+      toasts: { body: { title: string; message: string; variant: string } }[];
+      bodies: { state: { steps?: unknown[]; claims?: string[] } }[];
+    }
+
+    // history is what session.messages returns. onRead runs while the plugin waits for that read.
+    async function withSession(history: Message[], answers: Record<string, unknown>, run: (hooks: Hooks) => Promise<void>, onRead?: (hooks: Hooks) => Promise<void>) {
+      const fakes: Fakes = { reads: [], prompts: [], toasts: [], bodies: [] };
+      let hooks: Hooks | undefined;
+      const fetchImpl: FakeFetch = (_input, init) => {
+        fakes.bodies.push(JSON.parse(String(init?.body)) as Fakes['bodies'][number]);
+        return Promise.resolve(jsonResponse({ answers }));
+      };
+      const client = {
+        session: {
+          messages: async (options: { path: { id: string } }) => {
+            fakes.reads.push(options.path.id);
+            if (onRead && hooks) await onRead(hooks);
+            return { data: history };
+          },
+          promptAsync: (options: Fakes['prompts'][number]) => {
+            fakes.prompts.push(options);
+            return Promise.resolve({});
+          },
+        },
+        tui: {
+          showToast: (options: Fakes['toasts'][number]) => {
+            fakes.toasts.push(options);
+            return Promise.resolve(true);
+          },
+        },
+      };
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async next => {
+        hooks = next;
+        await run(next);
+      }, undefined, undefined, client);
+      return fakes;
+    }
+
+    test('checks the final message against the commands and edits it saw, asks the same agent to fix it, and tells the user', async () => {
+      const fakes = await withSession([user, done], failedRun, async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Fix the price bug.' }] });
+        await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+        await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'w', args: { filePath: 'src/a.ts', content: 'x' } }, { title: '', output: 'Wrote file', metadata: {} });
+        await hooks['tool.execute.after']({ tool: 'bash', sessionID: 'child', callID: 'c', args: { command: 'bun test src/a.test.ts' } }, { title: '', output: '1 fail', metadata: { exit: 1 } });
+        await hooks['tool.execute.after']({ tool: 'bash', sessionID: 's', callID: 'b', args: { command: 'bun test' } }, { title: '', output: '1 fail', metadata: { exit: 1 } });
+        await hooks.event(idle('s'));
+        // The idle after the follow-up turn is not checked again.
+        await hooks.event(idle('s'));
+        // session.idle is sent with session.status and is not a second check.
+        await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 's' } } });
+      });
+      expect(fakes.reads).toEqual(['s']);
+      expect(fakes.bodies).toHaveLength(1);
+      expect(fakes.bodies[0]?.state.claims).toEqual(['All tests pass now.']);
+      expect(fakes.bodies[0]?.state.steps).toEqual([{ edited: ['src/a.ts'] }, { command: 'bun test src/a.test.ts', exit: 1, output: '1 fail' }, { command: 'bun test', exit: 1, output: '1 fail' }]);
+      expect(fakes.prompts).toHaveLength(1);
+      expect(fakes.prompts[0]?.path).toEqual({ id: 's' });
+      expect(fakes.prompts[0]?.body.agent).toBe('build');
+      expect(fakes.prompts[0]?.body.model).toEqual(MODEL);
+      expect(fakes.prompts[0]?.body.parts).toHaveLength(1);
+      expect(fakes.prompts[0]?.body.parts[0]?.synthetic).toBe(true);
+      expect(fakes.prompts[0]?.body.parts[0]?.text).toStartWith('Jevy check: your last message says something this session does not show.\n- final message, claim "All tests pass now."\n  Claim contradicted: The last run of that check failed.\n  evidence: ran `bun test`, exit 1');
+      expect(fakes.toasts).toHaveLength(1);
+      expect(fakes.toasts[0]?.body.title).toBe('Jevy');
+      expect(fakes.toasts[0]?.body.variant).toBe('info');
+      expect(fakes.toasts[0]?.body.message).toStartWith('Jevy asked the agent to check its last message.\n- final message, claim "All tests pass now."');
+    });
+
+    test('only tells the user when Jev is not sure', async () => {
+      const unsure = { c0_support: { type: 'choice', choice: 'failed_run', probabilities: { failed_run: 0.6 }, confidence: 0.9 } };
+      const fakes = await withSession([user, done], unsure, async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Fix the price bug.' }] });
+        await hooks.event(idle('s'));
+      });
+      expect(fakes.prompts).toEqual([]);
+      expect(fakes.toasts[0]?.body.variant).toBe('warning');
+      expect(fakes.toasts[0]?.body.message).toStartWith('Jevy note: the agent\'s last message may claim more than this session shows.');
+    });
+
+    test('starts the steps over at each user message, and checks once per message', async () => {
+      const fakes = await withSession([user, done], failedRun, async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Run the tests.' }] });
+        await hooks['tool.execute.after']({ tool: 'bash', sessionID: 's', callID: 'b', args: { command: 'bun test' } }, { title: '', output: '1 fail', metadata: { exit: 1 } });
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Fix the price bug.' }] });
+        await hooks.event(idle('s'));
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'And the tax bug.' }] });
+        await hooks.event(idle('s'));
+      });
+      expect(fakes.reads).toEqual(['s', 's']);
+      expect(fakes.bodies.map(body => body.state.steps)).toEqual([[], []]);
+    });
+
+    test('skips subagents, sessions with no user message, synthetic prompts, aborted turns, and a turn the user has moved past', async () => {
+      const synthetic: Message = { info: { role: 'user', agent: 'build', model: MODEL }, parts: [{ type: 'text', text: 'Jevy check: ...', synthetic: true }] };
+      const aborted: Message = { info: { role: 'assistant', error: { name: 'MessageAbortedError' } }, parts: [{ type: 'text', text: 'All tests pass now.' }] };
+      const cases: { history: Message[]; child?: boolean; noMessage?: boolean }[] = [
+        { history: [user, done], child: true },
+        { history: [user, done], noMessage: true },
+        { history: [user, done, synthetic, done] },
+        { history: [user, aborted] },
+        { history: [user] },
+      ];
+      for (const item of cases) {
+        const fakes = await withSession(item.history, failedRun, async hooks => {
+          if (item.child) await hooks.event({ event: { type: 'session.created', properties: { info: { id: 's', parentID: 'top' } } } });
+          if (!item.noMessage) await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Fix the price bug.' }] });
+          await hooks.event(idle('s'));
+        });
+        expect(fakes.bodies).toHaveLength(0);
+        expect(fakes.prompts).toHaveLength(0);
+      }
+      const moved = await withSession([user, done], failedRun, async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Fix the price bug.' }] });
+        await hooks.event(idle('s'));
+      }, async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Never mind, stop.' }] });
+      });
+      expect(moved.bodies).toHaveLength(1);
+      expect(moved.prompts).toHaveLength(0);
+      expect(moved.toasts).toHaveLength(0);
+    });
+
+    test('does nothing without a key or without the session client', async () => {
+      const bodies: unknown[] = [];
+      const prompts: unknown[] = [];
+      const fetchImpl: FakeFetch = (_input, init) => {
+        bodies.push(init?.body);
+        return Promise.resolve(jsonResponse({ answers: failedRun }));
+      };
+      const idleTurn = async (hooks: Hooks) => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Fix the price bug.' }] });
+        await expect(hooks.event(idle('s'))).resolves.toBeUndefined();
+      };
+      await usingPlugin(undefined, fetchImpl, idleTurn, undefined, undefined, {
+        session: {
+          messages: async () => ({ data: [user, done] }),
+          promptAsync: () => {
+            prompts.push(true);
+            return Promise.resolve({});
+          },
+        },
+      });
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, idleTurn);
+      expect(bodies).toHaveLength(0);
+      expect(prompts).toHaveLength(0);
     });
   });
 });

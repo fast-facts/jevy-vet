@@ -6,6 +6,8 @@
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/fast-facts/jevy-vet/master.cron.code-analyze.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=CodeQL)](https://github.com/fast-facts/jevy-vet/actions/workflows/master.cron.code-analyze.yml)
 [![license](https://img.shields.io/github/license/fast-facts/jevy-vet?style=for-the-badge)](./LICENSE)
 
+An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check or fake a test's answer, and tells the agent when an edit may break your instructions or repeat code you already have, or when its last message claims more than it did.
+
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
 For every file an agent changes, it also asks Jev if the change breaks one of your instructions. That only adds a note for the agent. It never blocks.
@@ -112,6 +114,12 @@ When an agent changes a source file, the plugin looks for the tests of that file
 
 When Jev is sure, the change is blocked. When it is not sure, it goes through with a note. Real constants and documented values are fine. Tests, fixtures, mocks, and test helpers are not checked. If you asked for a stub or a hard-coded value, it is allowed. Without a key, this check does nothing.
 
+## What the agent says it did
+
+When the agent finishes and the session goes idle, the plugin reads its last message and asks Jev whether the claims in it are backed by what happened since your last message. For example, "all tests pass" when the last test run failed, ran only one file, or came before the last edit, "fixed" when nothing was changed, or "lint is clean" when lint never ran. Jev sees the commands the agent ran, with their exit codes and output, and the files it changed, in order.
+
+The turn is already over, so nothing is blocked. When Jev is sure, the plugin sends the agent one follow-up to fix it or correct its message, and shows you a toast. From 0.5 up to sure, you only get the toast. Below that, it says nothing. It checks once per message from you, never checks its own follow-up, and skips subagents. If you told the agent not to run the checks, there is no follow-up. Without a key, this check does nothing.
+
 ## What the agent sees
 
 A block message lists each test: the file, the test, the rule it broke in one plain line, the lines that show it, and what to do next. Only lines that are really in the test are shown. At most five tests are listed. It never tells the agent to delete a test or to leave it out.
@@ -147,7 +155,7 @@ If Jev is sure, a note tells the agent which function to reuse and where it is. 
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction and reuse checks add a note only when Jev is sure.
+For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction and reuse checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 
