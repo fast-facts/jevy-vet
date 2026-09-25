@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { changesFrom, commandFrom, editsFrom, isGatePath, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
+import { changesFrom, commandFrom, definitionsIn, editsFrom, isDefinitionFile, isGatePath, stripComments, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
 describe('testFilesFrom', () => {
   test('splits a write into setup and one case per test', () => {
@@ -212,5 +212,52 @@ describe('check files and commands', () => {
     for (const command of ['bun test', 'npm test', 'go test ./...', 'ls -la', 'bun run lint', 'cat src/index.ts', 'npx tsc --noEmit -p .', 'bun install']) {
       expect([command, touchesGates(command)]).toEqual([command, false]);
     }
+  });
+});
+
+describe('definitionsIn', () => {
+  test('finds functions, arrow functions, and methods, each to its closing line', () => {
+    const text = [
+      'import { read } from \'./read\';',
+      'export function formatDate(d: Date): string {',
+      '  return d.toISOString().slice(0, 10);',
+      '}',
+      'const isEven = (n: number) => n % 2 === 0;',
+      'export const load = async (path: string): Promise<string> => {',
+      '  return read(path);',
+      '};',
+      'export const LIMIT = 10;',
+      'class Parser {',
+      '  parse(text: string): number {',
+      '    if (text) {',
+      '      return 1;',
+      '    }',
+      '    return 0;',
+      '  }',
+      '}',
+    ].join('\n');
+    expect(definitionsIn(text, 'src/a.ts')).toEqual([
+      { name: 'formatDate', line: 2, code: 'export function formatDate(d: Date): string {\n  return d.toISOString().slice(0, 10);\n}' },
+      { name: 'isEven', line: 5, code: 'const isEven = (n: number) => n % 2 === 0;' },
+      { name: 'load', line: 6, code: 'export const load = async (path: string): Promise<string> => {\n  return read(path);\n};' },
+      { name: 'parse', line: 11, code: '  parse(text: string): number {\n    if (text) {\n      return 1;\n    }\n    return 0;\n  }' },
+    ]);
+  });
+
+  test('finds Python, Go, Rust, and Kotlin definitions', () => {
+    expect(definitionsIn('def total(values):\n    return sum(values)\n\nasync def fetch():\n    pass\n', 'a.py').map(item => [item.name, item.line])).toEqual([['total', 1], ['fetch', 4]]);
+    expect(definitionsIn('func (s *Store) Save(x int) error {\n\treturn nil\n}\n', 'a.go')[0]).toEqual({ name: 'Save', line: 1, code: 'func (s *Store) Save(x int) error {\n\treturn nil\n}' });
+    expect(definitionsIn('pub fn parse(s: &str) -> u32 {\n    0\n}\n', 'a.rs')[0]?.name).toBe('parse');
+    expect(definitionsIn('private fun String.slug(): String {\n    return lowercase()\n}\n', 'a.kt')[0]?.name).toBe('slug');
+  });
+
+  test('skips test files and files it cannot read definitions from', () => {
+    const text = 'export function a() {\n  return 1;\n}';
+    expect(definitionsIn(text, 'src/a.test.ts')).toEqual([]);
+    expect(definitionsIn(text, 'src/__tests__/a.ts')).toEqual([]);
+    expect(definitionsIn(text, 'README.md')).toEqual([]);
+    expect(definitionsIn(text, 'src/A.java')).toEqual([]);
+    expect(isDefinitionFile('src/a.mjs')).toBe(true);
+    expect(isDefinitionFile('test_a.py')).toBe(false);
   });
 });

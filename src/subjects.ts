@@ -433,3 +433,55 @@ export function touchesGates(command: string): boolean {
     return GATE_WORDS.has(path) || testDir || isGatePath(path) || isTestPath(path);
   });
 }
+
+// line is 1-based in the text it came from.
+export interface Definition {
+  name: string;
+  line: number;
+  code: string;
+}
+
+const DEFINITION_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|kt)$/;
+// ponytail: line starts only, not a parser. A definition split over several lines before its name is missed.
+const DEFINITIONS = [
+  /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/,
+  /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]*)?=>|[A-Za-z_$][\w$]*\s*=>)/,
+  /^\s*(?:(?:public|private|protected|static|async|override)\s+)*(?!(?:if|for|while|switch|catch|return|function|constructor)\b)([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\([^)]*\)\s*(?::\s*[^{]+)?\{\s*$/,
+  /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/,
+  /^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/,
+  /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)/,
+  /^\s*(?:(?:private|public|internal|protected|override|suspend|inline)\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)/,
+];
+const MAX_DEFINITION_LINES = 80;
+
+export function isDefinitionFile(filePath: string): boolean {
+  return DEFINITION_FILE.test(filePath) && !isTestPath(filePath);
+}
+
+// Each definition runs to the first later line indented no deeper, and includes a closing brace there.
+export function definitionsIn(text: string, filePath: string): Definition[] {
+  if (!isDefinitionFile(filePath)) return [];
+  const lines = text.split('\n');
+  const found: Definition[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    let name: string | undefined;
+    for (const pattern of DEFINITIONS) {
+      name = line.match(pattern)?.[1];
+      if (name) break;
+    }
+    if (!name) continue;
+    const indent = line.length - line.trimStart().length;
+    let end = i + 1;
+    while (end < lines.length && end - i < MAX_DEFINITION_LINES) {
+      const next = lines[end] ?? '';
+      if (next.trim() !== '' && next.length - next.trimStart().length <= indent) {
+        if (/^\s*(?:[}\])]|end\b)/.test(next)) end += 1;
+        break;
+      }
+      end += 1;
+    }
+    found.push({ name, line: i + 1, code: lines.slice(i, end).join('\n').trimEnd() });
+  }
+  return found;
+}

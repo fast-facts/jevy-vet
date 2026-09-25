@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
-import { type Block, checkInstructions, type Failure, review } from './review.ts';
+import { type Block, checkInstructions, checkReuse, type Failure, review } from './review.ts';
 import { loadSettings } from './settings.ts';
 import { commandFrom } from './subjects.ts';
 
@@ -39,7 +39,7 @@ const KEEP_SESSIONS = 100;
 // Checks started before a tool runs and not yet collected after it. A failed tool never collects.
 const KEEP_PENDING = 50;
 
-// Blocks useless test writes and changes that weaken a check, notes unsure ones and edits that may break the user's instructions, by calling TypeSafe directly.
+// Blocks useless test writes and changes that weaken a check, notes unsure ones, edits that may break the user's instructions, and new code that repeats existing code, by calling TypeSafe directly.
 // Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
 // TYPESAFE_BASE_URL in that file is optional.
 export default async function jevyVet(input: Input) {
@@ -144,15 +144,17 @@ export default async function jevyVet(input: Input) {
       });
       if (reason) throw new Error(reason);
       if (!hook.callID) return;
-      // Started now so it runs while the tool does. The after hook adds the note.
-      const check = checkInstructions(hook.tool, output.args, {
+      // Started now so they run while the tool does. The after hook adds the notes.
+      const instruction = checkInstructions(hook.tool, output.args, {
         ...shared,
         userMessages: messages.get(top) ?? [],
         cache: sentences,
         instructionFiles: paths => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk),
       }).catch(() => undefined);
-      pending.set(hook.callID, check.then(instruction => {
-        const parts = instruction ? [...notes, instruction] : notes;
+      const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
+      pending.set(hook.callID, Promise.all([instruction, reuse]).then(found => {
+        const parts = [...notes];
+        for (const note of found) if (note) parts.push(note);
         return parts.join('\n\n') || undefined;
       }));
       if (pending.size > KEEP_PENDING) {

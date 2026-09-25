@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { splitCases, type TestFile } from './subjects.ts';
+import { isDefinitionFile, splitCases, type TestFile } from './subjects.ts';
 
 // Context read from disk for one test file. None of it is judged.
 interface Source {
@@ -338,4 +338,71 @@ export function sentencesOf(text: string): string[] {
     }
   }
   return out;
+}
+
+// ponytail: only the root .gitignore, and no `!` patterns.
+const SKIP_DIRS = new Set(['node_modules', 'vendor', 'third_party', 'dist', 'build', 'out', 'coverage', 'target', 'generated', '__generated__']);
+const GENERATED_NAME = /(?:\.min\.js|\.d\.[cm]?ts|\.pb\.go|_pb2\.py|\.(?:generated|gen)\.\w+)$/;
+const GENERATED_MARK = /@generated|DO NOT EDIT/;
+const MAX_SOURCE_FILES = 2000;
+const MAX_LISTED_ENTRIES = 20_000;
+const MAX_SOURCE_FILE_CHARS = 200_000;
+
+export interface SourceFile {
+  path: string;
+  text: string;
+}
+
+export function sourceFiles(disk: Disk, skip: Set<string>): SourceFile[] {
+  const ignored = gitignored(disk);
+  const found: SourceFile[] = [];
+  const dirs = [''];
+  let listed = 0;
+  while (dirs.length > 0 && found.length < MAX_SOURCE_FILES && listed < MAX_LISTED_ENTRIES) {
+    const dir = dirs.shift() ?? '';
+    for (const name of disk.list(dir === '' ? disk.root : join(disk.root, dir))) {
+      listed += 1;
+      const path = dir === '' ? name : `${dir}/${name}`;
+      if (name.startsWith('.') || SKIP_DIRS.has(name) || ignored.some(pattern => pattern.test(path))) continue;
+      const full = join(disk.root, path);
+      if (isDefinitionFile(name)) {
+        if (skip.has(full) || GENERATED_NAME.test(name)) continue;
+        const text = disk.read(full);
+        if (text === undefined || text.length > MAX_SOURCE_FILE_CHARS || GENERATED_MARK.test(text.slice(0, 500))) continue;
+        found.push({ path: full, text });
+        if (found.length >= MAX_SOURCE_FILES) break;
+        continue;
+      }
+      // No stat on Disk. A name that is not source is a folder. list() on a file is empty.
+      dirs.push(path);
+    }
+  }
+  return found;
+}
+
+// A folder pattern also matches what is under it.
+function gitignored(disk: Disk): RegExp[] {
+  const patterns: RegExp[] = [];
+  for (const raw of (disk.read(join(disk.root, '.gitignore')) ?? '').split('\n')) {
+    const line = raw.trim().replace(/\/+$/, '');
+    if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
+    // Trailing slashes are already gone, so any slash left roots the pattern.
+    const anchored = line.includes('/');
+    let body = '';
+    const glob = line.replace(/^\//, '');
+    for (let i = 0; i < glob.length; i += 1) {
+      const rest = glob.slice(i);
+      if (rest.startsWith('**/')) {
+        body += '(?:.*/)?';
+        i += 2;
+      } else if (rest.startsWith('**')) {
+        body += '.*';
+        i += 1;
+      } else if (rest.startsWith('*')) body += '[^/]*';
+      else if (rest.startsWith('?')) body += '[^/]';
+      else body += (rest[0] ?? '').replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+    patterns.push(new RegExp(anchored ? `^${body}(?:/|$)` : `(?:^|/)${body}(?:/|$)`));
+  }
+  return patterns;
 }

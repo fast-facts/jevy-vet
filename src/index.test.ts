@@ -68,6 +68,15 @@ function before(hooks: Hooks, tool: string, args: unknown) {
   return hooks['tool.execute.before'](input, { args });
 }
 
+function withProject(files: Record<string, string>) {
+  const project = mkdtempSync(join(tmpdir(), 'jevy-vet-project-'));
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(join(project, path, '..'), { recursive: true });
+    writeFileSync(join(project, path), text);
+  }
+  return project;
+}
+
 describe('plugin', () => {
   test('exports only the plugin function', async () => {
     const mod = await import('./index.ts');
@@ -277,15 +286,6 @@ describe('plugin', () => {
       };
     }
 
-    function withProject(files: Record<string, string>) {
-      const project = mkdtempSync(join(tmpdir(), 'jevy-vet-project-'));
-      for (const [path, text] of Object.entries(files)) {
-        mkdirSync(join(project, path, '..'), { recursive: true });
-        writeFileSync(join(project, path), text);
-      }
-      return project;
-    }
-
     test('appends a note to the tool output for the same call, and never blocks', async () => {
       const project = withProject({ 'AGENTS.md': '- Do not edit src/api.ts.', 'src/api.ts': 'export const a = 1' });
       const sent: Sent[] = [];
@@ -480,6 +480,40 @@ describe('plugin', () => {
         await expect(hooks['tool.execute.before'](bash, { args: { command: 'git commit --no-verify -m x' } })).resolves.toBeUndefined();
       });
       expect(bodies).toHaveLength(0);
+    });
+  });
+  describe('reuse check', () => {
+    const TO_ISO_DAY = 'export function toIsoDay(date: Date): string {\n  return date.toISOString().slice(0, 10);\n}\n';
+    const FORMAT_DAY = 'export function formatDay(day: Date): string {\n  return day.toISOString().slice(0, 10);\n}\n';
+
+    test('reads the project from disk, respects .gitignore, and adds the note after the tool ran', async () => {
+      const project = withProject({
+        '.gitignore': 'ignored/\n',
+        'src/date.ts': TO_ISO_DAY,
+        'ignored/date.ts': TO_ISO_DAY,
+        'node_modules/lib/date.ts': TO_ISO_DAY,
+      });
+      const bodies: { state: { existing?: { path: string }[] } }[] = [];
+      const fetchImpl: FakeFetch = (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { state: { existing?: { path: string }[] } };
+        bodies.push(body);
+        return Promise.resolve(jsonResponse({ answers: { r0_x0_duplicates: { type: 'noul', noul: 0.9 } } }));
+      };
+      try {
+        await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+          const args = { filePath: join(project, 'src/format.ts'), content: FORMAT_DAY };
+          await expect(before(hooks, 'write', args)).resolves.toBeUndefined();
+          writeFileSync(args.filePath, args.content);
+          const output = { title: '', output: 'Wrote file', metadata: {} };
+          await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, output);
+          expect(output.output).toStartWith('Wrote file\n\nJevy note: this change was made, but it may repeat code that already exists.\n- src/format.ts, function "formatDay"');
+          expect(output.output).toContain('  existing: src/date.ts:1 export function toIsoDay(date: Date): string {');
+        }, undefined, project);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      const reuse = bodies.find(body => body.state.existing);
+      expect(reuse?.state.existing?.map(item => item.path)).toEqual(['src/date.ts']);
     });
   });
 });

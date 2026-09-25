@@ -1,6 +1,6 @@
 # jevy-vet
 
-An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check, and tells the agent when an edit may break your instructions.
+An OpenCode plugin that stops a weak test before the file is written, stops changes that switch off a check, and tells the agent when an edit may break your instructions or repeat code you already have.
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
@@ -127,11 +127,17 @@ It also uses your last three messages in that session. A subagent's edit is chec
 
 Rules that are only about formatting are left out. With no key, or when TypeSafe fails, there is no note. Changes to `node_modules` and to `jevy-vet.jsonc` are not checked.
 
+## Code you already have
+
+When an agent adds a new function to a source file, the plugin looks for the closest existing functions in your project. It skips tests, `node_modules`, vendored, built, and generated code, and what your `.gitignore` lists. It then asks Jev whether the new function does the same job as one of them.
+
+If Jev is sure, a note tells the agent which function to reuse and where it is. It never blocks. A move, or a rename that keeps half the old body, is not flagged. If you asked for a separate copy, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
+
 ## If Jev cannot decide
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks and changes to checks, a score from 0.5 up to sure adds a note instead. The instruction check adds a note only when Jev is sure.
+For the test checks and changes to checks, a score from 0.5 up to sure adds a note instead. The instruction and reuse checks add a note only when Jev is sure.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 
