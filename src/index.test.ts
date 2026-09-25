@@ -120,8 +120,8 @@ describe('plugin', () => {
       await expect(before(hooks, 'edit', {
         filePath: 'src/bar.test.ts',
         oldString: 'OLD_NOT_JUDGED',
-        newString: 'expect(x).toBeDefined()',
-      })).rejects.toThrow(`src/bar.test.ts, test 1\n  Passes on an empty result: ${sure}`);
+        newString: 'test(\'x\', () => { expect(x).toBeDefined() })',
+      })).rejects.toThrow(`src/bar.test.ts, test "x"\n  Passes on an empty result: ${sure}`);
       const patch = ['*** Begin Patch', '*** Add File: src/bad.test.ts', '+expect(x).toBeDefined()', '*** End Patch'].join('\n');
       await expect(before(hooks, 'apply_patch', { patchText: patch }))
         .rejects.toThrow(`src/bad.test.ts, test 1\n  Passes on an empty result: ${sure}`);

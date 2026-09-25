@@ -19,6 +19,8 @@ export interface TestFile {
 export function testFilesFrom(tool: string, args: unknown): TestFile[] {
   const files: TestFile[] = [];
   for (const subject of subjectsFrom(tool, args)) {
+    // A helper-only edit has no new test. The edit check finds the real test on disk.
+    if (tool === 'edit' && !subject.text.match(CASE_MARK)) continue;
     const parts = splitCases(subject.text);
     if (parts.cases.length === 0) continue;
     const patchText = tool === 'apply_patch' && isRecord(args) ? str(args, 'patchText') ?? '' : '';

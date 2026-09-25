@@ -115,13 +115,14 @@ describe('review', () => {
   });
 
   test('blocks when a hard rule is confident', async () => {
-    const result = await review('edit', { filePath: 'src/foo.test.ts', oldString: 'old', newString: 'expect(x).toBeDefined()' }, deps(() => Promise.resolve(jsonResponse({
+    const added = 'test(\'x\', () => { expect(x).toBeDefined() })';
+    const result = await review('edit', { filePath: 'src/foo.test.ts', oldString: 'old', newString: added }, deps(() => Promise.resolve(jsonResponse({
       answers: {
         t0_passes_on_empty: { noul: 0.91 },
         t0_title_mismatch: { noul: 0.1 },
       },
     }))));
-    expect(result).toContain('- src/foo.test.ts, test 1\n  Passes on an empty result: It would still pass if the code returned null, an empty value, or zero.\n  evidence: expect(x).toBeDefined()\n  next: Compare the result with a specific expected value.');
+    expect(result).toContain(`- src/foo.test.ts, test "x"\n  Passes on an empty result: It would still pass if the code returned null, an empty value, or zero.\n  evidence: ${added}\n  next: Compare the result with a specific expected value.`);
     expect(result).not.toContain('title');
     expect(result).not.toContain('old');
   });
@@ -476,7 +477,8 @@ describe('review', () => {
     });
 
     test('names both checks when a new test and an edit both fail', async () => {
-      const result = await editRun(weaken, { e0_change: sure('weaker'), t0_passes_on_empty: { noul: 0.95 } }).result;
+      const both = { ...weaken, newString: 'test(\'x\', () => { expect(add(1, 2)).toBeDefined() })' };
+      const result = await editRun(both, { e0_change: sure('weaker'), t0_passes_on_empty: { noul: 0.95 } }).result;
       expect(result).toContain('Jevy blocked this test write and edit.');
       expect(result).toContain('Passes on an empty result');
       expect(result).toContain('Weaker check');

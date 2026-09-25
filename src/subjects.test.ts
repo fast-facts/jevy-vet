@@ -13,12 +13,14 @@ describe('testFilesFrom', () => {
     }]);
   });
 
-  test('keeps a fragment with no test marker as one case and marks edits', () => {
-    expect(testFilesFrom('edit', { filePath: 'a.test.ts', oldString: 'x', newString: 'expect(x).toBe(1)' })).toEqual([{
+  test('skips a helper-only edit with no test marker, but keeps a real new test', () => {
+    const added = 'test(\'a\', () => { expect(x).toBe(1) })';
+    expect(testFilesFrom('edit', { filePath: 'a.test.ts', oldString: 'x', newString: 'expect(x).toBe(1)' })).toEqual([]);
+    expect(testFilesFrom('edit', { filePath: 'a.test.ts', oldString: 'x', newString: added })).toEqual([{
       path: 'a.test.ts',
-      cases: ['expect(x).toBe(1)'],
+      cases: [added],
       setup: '',
-      source: 'expect(x).toBe(1)',
+      source: added,
       edited: true,
     }]);
   });
