@@ -1,0 +1,5 @@
+{"id":"h1","check":"hidden","question":"x0_hides_error","expected":true,"answer":{"noul":0.91},"latencyMs":10,"requestChars":100}
+{"id":"h2","check":"hidden","question":"x1_hides_error","expected":false,"answer":{"noul":0.2},"latencyMs":10,"requestChars":100}
+{"id":"h3","check":"hidden","question":"x2_hides_error","expected":true,"answer":{"noul":0.55},"latencyMs":10,"requestChars":100}
+{"id":"c1","check":"claims","question":"c0_support","expected":"failed_run","answer":{"choice":"failed_run","probabilities":{"failed_run":0.9,"supported":0.1},"confidence":0.85},"model":"jev-1.13.0","latencyMs":12,"requestChars":80}
+{"id":"c2","check":"claims","question":"c1_support","expected":"supported","answer":{"choice":"supported","probabilities":{"failed_run":0.4,"supported":0.6},"confidence":0.5},"model":"jev-1.13.0","latencyMs":12,"requestChars":80}

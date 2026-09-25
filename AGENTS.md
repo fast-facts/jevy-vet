@@ -32,10 +32,15 @@ OpenCode plugin that vets agent writes with TypeSafe Jev. Test checks, the check
 - `src/stale.test.ts` — stale-comment check tests.
 - `src/fakes.test.ts` — the fake fetch and disk the check tests share.
 - `scripts/smoke.ts` — smoke test. `bun run smoke` runs a real `opencode` against fake model and TypeSafe servers. It is not part of `bun test`. `.github/workflows/master.pr.smoke.yml` installs OpenCode 1.x and runs it. It skips if `opencode` is not on PATH.
+- `eval/run.ts` — eval runner. `bun run eval` feeds each case to the real check and records the questions it asks. `bun run eval -- --live` sends those requests, capped, and writes scores under `eval/results/`.
+- `eval/cases/` — one JSONL file per check. A line is a tool call, not a copied question.
+- `eval/run.test.ts` — loader, dry-run, and summary tests. Fake fetch only.
 
 ## Rules
 
 - Tests use a fake `fetch`. They must not call the live API.
+- Eval cases are production inputs. The runner calls the real checks. It must not copy question text.
+- Live eval runs are manual and capped. They are not part of `bun test` or CI. They read the key only through `loadSettings`.
 - Do not add another export to `src/index.ts`. OpenCode treats every export as a plugin.
 - Do not add an MCP client, and do not shell out to `jev-mcp`.
 - Read `TYPESAFE_API_KEY` from `jevy-vet.jsonc` in the OpenCode config folder, next to `opencode.json` or `opencode.jsonc`, when a write is about to happen. Do not read it from the environment, and do not read it at import time.

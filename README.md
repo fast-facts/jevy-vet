@@ -185,3 +185,6 @@ bun run smoke
 ```
 
 The tests do not need an API key. `bun run smoke` runs the plugin inside OpenCode, against fake servers only. It skips if `opencode` is not installed. GitHub Actions installs OpenCode 1.x and runs it.
+
+`bun run eval` calls the real checks on the cases in `eval/cases` and does not need a key.
+`bun run eval -- --live` sends one capped run to TypeSafe. It reads the key only through `loadSettings`.
