@@ -87,7 +87,6 @@ interface PatchFile {
   rows: string[];
 }
 
-// New tests use the destination path. Edits use the old path.
 function patchFiles(patchText: string): PatchFile[] {
   const patch = patchLines(patchText);
   if (!patch) return [];
@@ -167,10 +166,38 @@ const CASE_MARK = /^[ \t]*(?:(?:test|it)(?:\.[A-Za-z]+)?\(|(?:async[ \t]+)?def t
 export function splitCases(text: string): { cases: string[]; setup: string } {
   const marks = [...text.matchAll(CASE_MARK)];
   if (marks.length === 0) return { cases: text.trim() === '' ? [] : [text.trim()], setup: '' };
+  // A same-indent helper is not part of the test. ponytail: keyword check, not a parser. Other keywords or odd spacing stay in the case.
+  const siblingStart = /^(?:export\s+)?(?:async\s+function\b|function\b|const\b|let\b|class\b|describe\b)/;
+  const lines = text.split('\n');
+  const starts: number[] = [0];
+  for (let i = 0; i < lines.length - 1; i += 1) starts.push((starts[i] ?? 0) + (lines[i]?.length ?? 0) + 1);
+  const lineOf = (index: number): number => {
+    let line = 0;
+    for (let i = 0; i < starts.length; i += 1) {
+      if ((starts[i] ?? 0) <= index) line = i;
+      else break;
+    }
+    return line;
+  };
+  const indentOf = (line: string): number => line.length - line.trimStart().length;
   const cases: string[] = [];
   for (let i = 0; i < marks.length; i += 1) {
     const start = marks[i]?.index ?? 0;
-    const end = marks[i + 1]?.index ?? text.length;
+    const nextStart = marks[i + 1]?.index ?? text.length;
+    const startLine = lineOf(start);
+    const endLine = lineOf(Math.max(nextStart - 1, start));
+    const testIndent = indentOf(lines[startLine] ?? '');
+    let cutLine = endLine + 1;
+    for (let n = startLine + 1; n <= endLine; n += 1) {
+      const line = lines[n] ?? '';
+      if (line.trim() === '') continue;
+      if (indentOf(line) === testIndent && siblingStart.test(line.trimStart())) {
+        cutLine = n;
+        break;
+      }
+    }
+    const cutIndex = cutLine < lines.length ? (starts[cutLine] ?? nextStart) : text.length;
+    const end = Math.min(cutIndex, nextStart);
     const part = text.slice(start, end).trim();
     if (part !== '') cases.push(part);
   }
@@ -266,7 +293,7 @@ function splitHunks(rows: string[]): string[][] {
   return hunks.filter(hunk => hunk.length > 0);
 }
 
-// Pair old and new tests by title. Text without test markers is one pair, titled from the file on disk.
+// Pair old and new tests by title. A fragment with no marker is one pair only if it sits in a test on disk, or the file cannot be read.
 function pairCases(filePath: string, oldText: string, newText: string, readDisk: () => string | undefined): EditPair[] {
   const oldCases = splitCases(oldText).cases;
   const newCases = splitCases(newText).cases;
@@ -288,6 +315,8 @@ function pairCases(filePath: string, oldText: string, newText: string, readDisk:
   const firstLine = oldText.split('\n').map(line => line.trim()).find(line => line !== '') ?? '';
   const disk = readDisk();
   const around = disk === undefined ? undefined : splitCases(disk).cases.find(item => item.includes(firstLine));
+  // Setup and helpers are context, not judged.
+  if (around === undefined && disk !== undefined) return [];
   const title = around === undefined ? undefined : titleOf(around);
   return [{ path: filePath, ...(title ? { title } : {}), old: oldText.trim(), new: newText.trim() }];
 }

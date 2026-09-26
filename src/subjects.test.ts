@@ -132,6 +132,30 @@ describe('editsFrom', () => {
       { path: 'a.test.ts', old: 'expect(x).toBe(1)', new: 'expect(x).toBe(2)' },
     ]);
   });
+
+  test('drops a helper edit when the file is on disk, still pairs an assertion edit, and keeps the helper edit when the file is missing', () => {
+    const helper = 'async function withFastTimer(fn) {\n  return fn()\n}';
+    const onDisk = [
+      'test(\'A\', () => {',
+      '  function inner() {',
+      '    return 1',
+      '  }',
+      '  expect(add(1, 2)).toBe(3)',
+      '})',
+      helper,
+      'test(\'B\', () => {',
+      '  expect(add(2, 3)).toBe(5)',
+      '})',
+    ].join('\n');
+    const read = (path: string) => path === 'a.test.ts' ? onDisk : undefined;
+    expect(editsFrom('edit', { filePath: 'a.test.ts', oldString: helper, newString: '' }, read)).toEqual([]);
+    expect(editsFrom('edit', { filePath: 'a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: 'expect(add(1, 2)).toBe(4)' }, read)).toEqual([
+      { path: 'a.test.ts', title: 'A', old: 'expect(add(1, 2)).toBe(3)', new: 'expect(add(1, 2)).toBe(4)' },
+    ]);
+    expect(editsFrom('edit', { filePath: 'a.test.ts', oldString: helper, newString: '' }, () => undefined)).toEqual([
+      { path: 'a.test.ts', old: helper, new: '' },
+    ]);
+  });
 });
 
 describe('stripComments', () => {
