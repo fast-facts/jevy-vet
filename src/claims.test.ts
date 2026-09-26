@@ -11,8 +11,10 @@ describe('claim check', () => {
   ];
   const choice = (picked: string, probability = 0.92) => ({ type: 'choice', choice: picked, probabilities: { [picked]: probability }, confidence: 0.9 });
 
+  interface Sent { command?: string; exit?: number; output?: string; edited?: string[] }
+
   interface ClaimBody {
-    state: { purpose: string; user_messages?: string[]; final_message: string; claims: string[]; steps: Step[]; past_steps?: Step[] };
+    state: { purpose: string; user_messages?: string[]; claims: string[]; steps: Sent[]; past_steps?: Sent[]; final_message?: string };
     questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }>;
   }
 
@@ -26,14 +28,16 @@ describe('claim check', () => {
     return { result: checkClaims(message, { ...used, steps, userMessages: options.userMessages, pastSteps: options.pastSteps }), bodies, used };
   }
 
-  test('asks one choice per claim in one call, with the steps and the final message', async () => {
+  test('asks one choice per claim in one call, without the final message', async () => {
     const asked = run(FINAL, failed, {});
     expect(await asked.result).toBeUndefined();
     expect(asked.bodies).toHaveLength(1);
     const body = asked.bodies[0];
     expect(body?.state.claims).toEqual(['I fixed the rounding bug in src/price.ts.', 'All tests pass now.']);
     expect(body?.state.steps).toEqual(failed);
-    expect(body?.state.final_message).toBe(FINAL);
+    expect('final_message' in (body?.state ?? {})).toBe(false);
+    expect(body?.state.purpose).not.toContain('`final_message`');
+    expect(body?.state.purpose).toContain('taken from the agent\'s final message');
     expect(body?.state.user_messages).toBeUndefined();
     expect(Object.keys(body?.questions ?? {})).toEqual(['c0_support', 'c1_support']);
     expect(body?.questions.c1_support).toEqual({
@@ -47,6 +51,48 @@ describe('claim check', () => {
         no_change: 'It says something was fixed, changed, added, or removed, but no edit in `steps` touches the files or code it names.',
       },
     });
+  });
+
+  test('sends no output for passing commands no claim names', async () => {
+    const passing: Step[] = [
+      { edited: ['src/price.ts'] },
+      { command: 'bun test', exit: 0, output: '10 pass' },
+      { command: 'bun run lint', exit: 0, output: 'clean' },
+    ];
+    const asked = run(FINAL, passing, {});
+    expect(await asked.result).toBeUndefined();
+    const sent = asked.bodies[0]?.state.steps ?? [];
+    expect(sent).toHaveLength(3);
+    for (const step of sent) expect('output' in step).toBe(false);
+  });
+
+  test('keeps the output of the last failed run, in steps and past steps', async () => {
+    const twoFails: Step[] = [
+      { edited: ['src/price.ts'] },
+      { command: 'bun test', exit: 1, output: 'first fail' },
+      { command: 'bun test', exit: 1, output: 'second fail' },
+    ];
+    const pastFail: Step[] = [{ command: 'bun test', exit: 1, output: 'old fail' }];
+    const asked = run(FINAL, twoFails, {}, { pastSteps: pastFail });
+    expect(await asked.result).toBeUndefined();
+    const sent = asked.bodies[0]?.state.steps ?? [];
+    expect(sent[1]).toEqual({ command: 'bun test', exit: 1 });
+    expect(sent[2]).toEqual({ command: 'bun test', exit: 1, output: 'second fail' });
+    expect(asked.bodies[0]?.state.past_steps).toEqual([{ command: 'bun test', exit: 1, output: 'old fail' }]);
+  });
+
+  test('keeps the output of a command the claim names', async () => {
+    const message = 'I ran bun test src/price.test.ts and all tests pass now.';
+    const mixed: Step[] = [
+      { edited: ['src/price.ts'] },
+      { command: 'bun test src/price.test.ts', exit: 0, output: '1 pass' },
+      { command: 'bun run lint', exit: 0, output: 'clean' },
+    ];
+    const asked = run(message, mixed, {});
+    expect(await asked.result).toBeUndefined();
+    const sent = asked.bodies[0]?.state.steps ?? [];
+    expect(sent[1]).toEqual({ command: 'bun test src/price.test.ts', exit: 0, output: '1 pass' });
+    expect(sent[2]).toEqual({ command: 'bun run lint', exit: 0 });
   });
 
   test('makes no call for a message with no claim, or without a key', async () => {
@@ -119,7 +165,7 @@ describe('claim check', () => {
   });
 
   test('does not flag a summary of earlier committed work, but still flags a new unsupported claim', async () => {
-    const past: Step[] = [{ edited: ['src/price.ts'] }, { command: 'bun test', exit: 0, output: 'ok' }];
+    const past: Step[] = [{ edited: ['src/price.ts'] }];
     const ok = run(FINAL, [], { c0_support: choice('supported'), c1_support: choice('supported') }, { pastSteps: past });
     expect(await ok.result).toBeUndefined();
     expect(ok.bodies).toHaveLength(1);

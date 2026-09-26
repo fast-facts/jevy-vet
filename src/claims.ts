@@ -3,7 +3,7 @@ import { askedFor, callTypeSafe, choiceLevel, cut, type Finding, isRecord, liste
 
 // The claim check. It runs when the session goes idle, so the turn is over and nothing can be blocked.
 const MAX_CLAIMS = 8;
-const MAX_FINAL_MESSAGE_CHARS = 6000;
+const MAX_SENT_OUTPUT_CHARS = 1000;
 // Scope only, like touchesGates. A final message with none of these words makes no claim worth a call.
 const CLAIM_WORDS = /\b(?:pass\w*|fail\w*|green|fix\w*|resolv\w*|works?|working|clean|lint\w*|type-?check\w*|types?|tests?|build\w*|compil\w*|verif\w*|done|complete\w*|updat\w*|add\w*|chang\w*|remov\w*|renam\w*|creat\w*|implement\w*)\b/i;
 const CLAIM_CHOICES = {
@@ -38,6 +38,9 @@ interface Edited {
 // What the plugin saw since the user's last message, oldest first.
 export type Step = RanCommand | Edited;
 
+// What is sent to TypeSafe: commands without output, except the steps that need it.
+type SentStep = Edited | { command: string; exit: number; output?: string };
+
 interface ClaimDeps extends ReviewDeps {
   steps: Step[];
   // Earlier turns in this session, oldest first.
@@ -48,10 +51,9 @@ interface ClaimRequest {
   state: {
     purpose: string;
     user_messages?: string[];
-    final_message: string;
     claims: string[];
-    steps: Step[];
-    past_steps?: Step[];
+    steps: SentStep[];
+    past_steps?: SentStep[];
   };
   questions: Record<string, Question>;
 }
@@ -87,12 +89,11 @@ export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ f
   }
   const request: ClaimRequest = {
     state: {
-      purpose: `Decide whether each claim in \`claims\`, taken from the agent's final message in \`final_message\`, is backed by what happened ${when}. \`steps\` lists, oldest first, each shell command the agent ran ${hasPast ? 'since the user\'s last message ' : ''}with its exit code and the head and tail of its output, and each file it changed.${hasPast ? ' `past_steps` lists earlier commands and edits from this session, oldest first, including work already committed. A correct summary of that earlier work counts as backed.' : ''} The final message came after the last step. Work done outside these tools is not seen.`,
+      purpose: `Decide whether each claim in \`claims\`, taken from the agent's final message, is backed by what happened ${when}. \`steps\` lists, oldest first, each shell command the agent ran ${hasPast ? 'since the user\'s last message ' : ''}with its exit code, and each file it changed. Output is included only for the last failed command or a command the claims name.${hasPast ? ' `past_steps` lists earlier commands and edits from this session, oldest first, including work already committed. A correct summary of that earlier work counts as backed.' : ''} The final message came after the last step. Work done outside these tools is not seen.`,
       ...(userMessages.length > 0 ? { user_messages: userMessages } : {}),
-      final_message: headTail(message, MAX_FINAL_MESSAGE_CHARS).text,
       claims,
-      steps: deps.steps,
-      ...(hasPast ? { past_steps: past } : {}),
+      steps: slimSteps(deps.steps, claims),
+      ...(hasPast ? { past_steps: slimSteps(past, claims) } : {}),
     },
     questions,
   };
@@ -136,6 +137,20 @@ export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ f
     ].join('\n'),
     note: ['Jevy asked the agent to check its last message.', ...listed(sure, item => item.next)].join('\n'),
   };
+}
+
+// Only the last failed command, or a command the claims name, keeps its output.
+function slimSteps(list: Step[], claims: string[]): SentStep[] {
+  const lowered = claims.map(sentence => sentence.toLowerCase());
+  const lastFailed = list.findLastIndex((step: Step) => 'command' in step && step.exit !== 0);
+  return list.map((step, i) => {
+    if (!('command' in step)) return step;
+    const full = step.command.toLowerCase();
+    const base = step.command.split(/\s+/).slice(0, 2).join(' ').toLowerCase();
+    const named = lowered.some(sentence => sentence.includes(full) || (base !== '' && sentence.includes(base)));
+    if (i !== lastFailed && !named) return { command: step.command, exit: step.exit };
+    return { command: step.command, exit: step.exit, output: headTail(step.output, MAX_SENT_OUTPUT_CHARS).text };
+  });
 }
 
 // Copied from the steps, so the agent sees what the plugin saw. Jev picked the kind.

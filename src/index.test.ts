@@ -1005,7 +1005,7 @@ describe('plugin', () => {
       expect(fakes.reads).toEqual(['s']);
       expect(fakes.bodies).toHaveLength(1);
       expect(fakes.bodies[0]?.state.claims).toEqual(['All tests pass now.']);
-      expect(fakes.bodies[0]?.state.steps).toEqual([{ edited: ['src/a.ts'] }, { command: 'bun test src/a.test.ts', exit: 1, output: '1 fail' }, { command: 'bun test', exit: 1, output: '1 fail' }]);
+      expect(fakes.bodies[0]?.state.steps).toEqual([{ edited: ['src/a.ts'] }, { command: 'bun test src/a.test.ts', exit: 1 }, { command: 'bun test', exit: 1, output: '1 fail' }]);
       expect(fakes.prompts).toHaveLength(1);
       expect(fakes.prompts[0]?.path).toEqual({ id: 's' });
       expect(fakes.prompts[0]?.body.agent).toBe('build');
