@@ -21,9 +21,9 @@ export interface Disk {
   list: (dir: string) => string[];
 }
 
-const MAX_SETUP_CHARS = 6000;
-export const MAX_CODE_FILE_CHARS = 16_000;
-export const MAX_CODE_CHARS = 32_000;
+const MAX_SETUP_CHARS = 3_000;
+export const MAX_CODE_FILE_CHARS = 6_000;
+export const MAX_CODE_CHARS = 12_000;
 const MAX_FILE_BYTES = 1_000_000;
 const MAX_CODE_FILES = 6;
 
