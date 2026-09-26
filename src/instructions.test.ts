@@ -117,7 +117,7 @@ describe('instruction check', () => {
     const change = { filePath: '/repo/src/billing.ts', content: 'export const rate = 2' };
     expect(await checkInstructions('write', change, instructionDeps(lifted.fetchImpl, { messages }))).toBeUndefined();
     const check = lifted.sent[1];
-    expect(check?.state.user_messages).toEqual(messages);
+    expect(check?.state.user_messages).toEqual(messages.slice(-1));
     expect(check?.state.instructions).toEqual([{ from: 'user_messages[0]', text: 'Never touch the billing code.' }]);
     expect(check?.questions.i0_lifted?.instructions).toBe('Does a message in `user_messages` that comes after the instruction in `instructions[0]` take it back or allow an exception to it?');
 

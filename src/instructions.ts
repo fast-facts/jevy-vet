@@ -1,6 +1,6 @@
 import { isAbsolute, relative } from 'node:path';
 import { headTail, type InstructionFile, sentencesOf } from './context.ts';
-import { callTypeSafe, ignoredPath, latestUserMessages, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulIsSure, noulScore, type Question, reader, type ReviewDeps, withoutComments } from './jev.ts';
+import { callTypeSafe, ignoredPath, latestUserMessages, logOnce, MAX_QUESTIONS, noulIsSure, noulScore, type Question, reader, type ReviewDeps, withoutComments } from './jev.ts';
 import { type Settings } from './settings.ts';
 import { type Change, changesFrom } from './subjects.ts';
 
@@ -10,6 +10,7 @@ const MAX_INSTRUCTIONS = 20;
 const MAX_FILE_SENTENCES = 150;
 const MAX_SENTENCES_PER_REQUEST = 100;
 const MAX_SENTENCE_CHARS = 200;
+const MAX_RULE_CHANGE_CHARS = 2000;
 const MAX_CACHED_SENTENCES = 2000;
 const MAX_CHANGES = 10;
 const MAX_WARNINGS = 5;
@@ -250,7 +251,7 @@ function pathApplies(changePath: string, instructionPath: string): boolean {
 
 function ruleRequest(changes: Change[], rules: Sentence[], userMessages: string[]): RuleRequest {
   const questions: Record<string, Question> = {};
-  const side = (text: string, path: string) => headTail(withoutComments(text, path), MAX_EDIT_SIDE_CHARS).text;
+  const side = (text: string, path: string) => headTail(withoutComments(text, path), MAX_RULE_CHANGE_CHARS).text;
   for (const j of changes.keys()) {
     for (const k of rules.keys()) {
       const paths = pathsInInstruction(rules[k].text);
@@ -279,8 +280,8 @@ function ruleRequest(changes: Change[], rules: Sentence[], userMessages: string[
   }
   return {
     state: {
-      purpose: 'Decide whether each change in `changes` breaks an instruction in `instructions`. `new` is the text after the change. `old`, when present, is the text it replaced, for contrast only. `user_messages` are the user\'s messages, oldest first. The latest user message wins over earlier instructions. Comments were removed from code files.',
-      ...(userMessages.length > 0 ? { user_messages: userMessages } : {}),
+      purpose: 'Decide whether each change in `changes` breaks an instruction in `instructions`. `new` is the text after the change. `old`, when present, is the text it replaced, for contrast only. `user_messages` is the latest user message. It wins over earlier instructions. Comments were removed from code files.',
+      ...(userMessages.length > 0 ? { user_messages: latestUserMessages(userMessages) } : {}),
       instructions: rules.map(rule => ({ from: rule.from, text: rule.text })),
       changes: changes.map(change => ({
         path: change.path,
