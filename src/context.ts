@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { splitCases, type TestFile } from './subjects.ts';
+import { splitCases, stripComments, type TestFile } from './subjects.ts';
 
 // Context read from disk for one test file. None of it is judged.
 interface Source {
@@ -31,7 +31,7 @@ const JS_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
 export function contextFor(file: TestFile, disk: Disk | undefined): FileContext {
   const newSetup = file.setup;
-  if (!disk) return withSetup(newSetup, []);
+  if (!disk) return withSetup(newSetup, [], file.path);
 
   const testPath = isAbsolute(file.path) ? resolve(file.path) : resolve(disk.root, file.path);
   // An edit, or a fragment with no setup, may leave the imports only on disk.
@@ -48,16 +48,18 @@ export function contextFor(file: TestFile, disk: Disk | undefined): FileContext 
     seen.add(candidate);
     const text = disk.read(candidate);
     if (text === undefined || text.trim() === '') continue;
+    const stripped = stripComments(text, candidate);
+    if (stripped === '') continue;
     const budget = Math.min(MAX_CODE_FILE_CHARS, MAX_CODE_CHARS - used);
-    const cut = fit(text, budget, importedNames(source));
+    const cut = fit(stripped, budget, importedNames(source));
     code.push({ path: relative(disk.root, candidate).split(sep).join('/'), text: cut.text, truncated: cut.truncated });
     used += cut.text.length;
   }
-  return withSetup(setup, code);
+  return withSetup(setup, code, testPath);
 }
 
-function withSetup(setup: string, code: Source[]): FileContext {
-  const cut = headTail(setup, MAX_SETUP_CHARS);
+function withSetup(setup: string, code: Source[], testPath: string): FileContext {
+  const cut = headTail(stripComments(setup, testPath), MAX_SETUP_CHARS);
   return { setup: cut.text, setupTruncated: cut.truncated, code };
 }
 
@@ -168,7 +170,6 @@ function importedNames(source: string): string[] {
 }
 
 function fit(text: string, budget: number, names: string[]): { text: string; truncated: boolean } {
-  if (text.length <= budget) return { text, truncated: false };
   const parts: string[] = [];
   let used = 0;
   for (const name of names) {

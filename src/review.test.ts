@@ -292,7 +292,7 @@ describe('review', () => {
     const parsed = JSON.parse(body) as SentBody;
     const file = parsed.state.files[0];
     expect(file.setup).toContain('const twice');
-    expect(file.code_under_test).toEqual([{ path: 'src/math.ts', text: code, truncated: false }]);
+    expect(file.code_under_test).toEqual([{ path: 'src/math.ts', text: code, truncated: true }]);
     expect(file.cases.map(item => item.title)).toEqual(['adds', 'doubles']);
     expect(file.cases[0].test).not.toContain('import');
     expect(Object.keys(parsed.questions)).toHaveLength(10);

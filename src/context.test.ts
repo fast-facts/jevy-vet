@@ -113,6 +113,17 @@ describe('contextFor', () => {
     expect(code?.text).toBe('export function wanted(n: number) {\n  return n * 2\n}');
   });
 
+  test('sends only the wanted function from a small file, without comments', () => {
+    const d = disk({ '/repo/src/math.ts': '// adds two numbers\nexport function add(a: number, b: number) { return a + b }\nexport function sub(a: number, b: number) { return a - b }' });
+    const file = written('/repo/src/math.test.ts', 'import { add } from \'./math\';\ntest(\'adds\', () => { expect(add(1, 2)).toBe(3) })');
+    const code = contextFor(file, d).code[0];
+    expect(code?.path).toBe('src/math.ts');
+    expect(code?.truncated).toBe(true);
+    expect(code?.text).toBe('export function add(a: number, b: number) { return a + b }');
+    expect(code?.text).not.toContain('adds two numbers');
+    expect(code?.text).not.toContain('sub');
+  });
+
   test('keeps the head and tail of a large file when no definition is found', () => {
     const d = disk({ '/repo/src/big.ts': `HEAD${'x'.repeat(40_000)}TAIL` });
     const code = contextFor(written('/repo/src/big.test.ts', 'test(\'x\', () => {})'), d).code[0];

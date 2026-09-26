@@ -222,7 +222,7 @@ describe('plugin', () => {
     }
     const parsed = JSON.parse(body) as { state: { files: { code_under_test: { path: string; text: string; truncated: boolean }[] }[] } };
     expect(parsed.state.files[0].code_under_test).toEqual([
-      { path: 'src/math.ts', text: 'export function add(a: number, b: number) { return a + b }', truncated: false },
+      { path: 'src/math.ts', text: 'export function add(a: number, b: number) { return a + b }', truncated: true },
     ]);
     expect(body).not.toContain('export const SECRET_OUTSIDE');
   });
