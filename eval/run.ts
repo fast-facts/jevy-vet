@@ -4,7 +4,7 @@ import { checkClaims, type Step } from '../src/claims.ts';
 import { type Disk, type InstructionFile } from '../src/context.ts';
 import { checkHiddenErrors } from '../src/hidden.ts';
 import { checkInstructions } from '../src/instructions.ts';
-import { type Block, type Failure, type History, isRecord, type ReviewDeps } from '../src/jev.ts';
+import { type Block, clearAnswerCache, type Failure, type History, isRecord, type ReviewDeps } from '../src/jev.ts';
 import { checkReuse } from '../src/reuse.ts';
 import { review } from '../src/review.ts';
 import { loadSettings, type Settings } from '../src/settings.ts';
@@ -209,6 +209,7 @@ export async function runCases(cases: EvalCase[], options: RunOptions = {}): Pro
       break;
     }
     const state: CaptureState = { settings, options, limit, report, captured: [] };
+    clearAnswerCache();
     await runOne(item, state);
     for (const hit of state.captured) {
       report.requests += 1;
