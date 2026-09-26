@@ -55,8 +55,8 @@ const CLAIMS: readonly Claim[] = [
     needsCode: false,
     ask: ref => `Would the test in ${ref.test} still pass if the code it tests returned null, an empty value, or zero instead of the correct result? Helpers it calls may be in ${ref.setup}.`,
     criteria: {
-      true: 'No assertion would notice. For example it only checks that a value is defined, that a mock was called, that nothing was thrown, or that a list is not empty.',
-      false: 'An assertion compares the result with a specific expected value that null, empty, or zero would not match, or the correct result is itself null, empty, or zero and the test checks it exactly.',
+      true: 'No assertion would notice. For example it only checks that a value is defined, that a mock was called with no expected count, that nothing was thrown, or that a list is not empty.',
+      false: 'An assertion compares the result with a specific expected value that null, empty, or zero would not match, or the correct result is itself null, empty, or zero and the test checks it exactly. A call count compared to a specific number, such as `expect(calls()).toBe(2)`, and an equality such as `expect(second).toEqual(first)`, would fail on null, empty, or zero. Those are not problems.',
     },
   },
   {

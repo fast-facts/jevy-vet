@@ -80,6 +80,9 @@ describe('review', () => {
     expect(parsed.questions.t0_title_mismatch.criteria).toEqual({ true: 'yes', false: 'no' });
     expect(parsed.questions.t0_title_mismatch.instructions).toContain('`files[0].cases[0].test`');
     expect(parsed.questions.t0_passes_on_empty.criteria.true).toContain('No assertion would notice');
+    expect(parsed.questions.t0_passes_on_empty.criteria.true).toContain('with no expected count');
+    expect(parsed.questions.t0_passes_on_empty.criteria.false).toContain('expect(calls()).toBe(2)');
+    expect(parsed.questions.t0_passes_on_empty.criteria.false).toContain('expect(second).toEqual(first)');
     expect(parsed.state.files[0].cases[0]).toEqual({ id: 't0', title: 'adds', test: USEFUL });
   });
 
