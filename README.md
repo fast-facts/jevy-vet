@@ -10,8 +10,6 @@ An OpenCode plugin that stops a weak test before the file is written. It also st
 
 When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
 
-For every file an agent changes, it also asks Jev if the change breaks one of your instructions. That only adds a note for the agent. It never blocks.
-
 ## Install
 
 OpenCode installs the npm package `jevy-vet` when it starts. You do not install it yourself.
@@ -94,9 +92,9 @@ These are allowed:
 
 The message shows the lines that changed. It tells the agent to fix the code, or to stop and ask you if the old test is wrong.
 
-### When you asked for the change
+## When you asked for the change
 
-Your own words allow the edit. The plugin keeps your last three messages for that session, in memory only, and sends them with the edit so Jev can tell.
+Your own words allow the edit. This covers every check on this page. The plugin keeps your last three messages for that session, in memory only, and sends them with the edit so Jev can tell.
 
 Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
 
@@ -106,19 +104,19 @@ This runs when an agent changes a file that sets what CI, the tests, lint, type 
 
 It also runs before a `bash` command that names `git`, `pkg`, `set-script`, `HUSKY`, a test, or one of those files, such as `git commit --no-verify` or a `sed` edit to `tsconfig.json`. Other commands are not sent.
 
-When Jev is sure, the change or command is blocked. When it is not sure, it goes through with a note. If you asked for it, it is allowed, the same as a test edit. Jev also sees the last command that failed, as context. Without a key, this check does nothing.
+When Jev is sure, the change or command is blocked. When it is not sure, it goes through with a note. Jev also sees the last command that failed, as context.
 
 ## Code that fakes a test's answer
 
 When an agent changes a source file, the plugin looks for the tests of that file: tests that import it or are named after it. If a new line in the change uses a value that is also in one of those tests, such as `if (qty === 42) return 210`, or checks whether a test is running, Jev is asked whether the code hard-codes that test's answer instead of doing the real work. Other changes are not sent.
 
-When Jev is sure, the change is blocked. When it is not sure, it goes through with a note. Real constants and documented values are fine. Tests, fixtures, mocks, and test helpers are not checked. If you asked for a stub or a hard-coded value, it is allowed. Without a key, this check does nothing.
+When Jev is sure, the change is blocked. When it is not sure, it goes through with a note. Real constants and documented values are fine. Tests, fixtures, mocks, and test helpers are not checked. If you asked for a stub or a hard-coded value, it is allowed.
 
 ## What the agent says it did
 
 When the agent finishes and the session goes idle, the plugin reads its last message and asks Jev whether the claims in it are backed by what happened since your last message. For example, "all tests pass" when the last test run failed, ran only one file, or came before the last edit, "fixed" when nothing was changed, or "lint is clean" when lint never ran. Jev sees the commands the agent ran, with their exit codes and output, and the files it changed, in order.
 
-The turn is already over, so nothing is blocked. When Jev is sure, the plugin sends the agent one follow-up to fix it or correct its message, and shows you a toast. From 0.5 up to sure, you only get the toast. Below that, it says nothing. It checks once per message from you, never checks its own follow-up, and skips subagents. If you told the agent not to run the checks, there is no follow-up. Without a key, this check does nothing.
+The turn is already over, so nothing is blocked. When Jev is sure, the plugin sends the agent one follow-up to fix it or correct its message, and shows you a toast. From 0.5 up to sure, you only get the toast. Below that, it says nothing. It checks once per message from you, never checks its own follow-up, and skips subagents. If you told the agent not to run the checks, there is no follow-up.
 
 ## What the agent sees
 
@@ -143,33 +141,33 @@ It also uses your last three messages in that session. A subagent's edit is chec
 
 `.cursor/rules` and `.github/copilot-instructions.md` are read only if you add them to `instructions`, the same as OpenCode.
 
-Rules that are only about formatting are left out. With no key, or when TypeSafe fails, there is no note. Changes to `node_modules` and to `jevy-vet.jsonc` are not checked.
+Rules that are only about formatting are left out. Changes to `node_modules` and to `jevy-vet.jsonc` are not checked.
 
 ## Code you already have
 
 When an agent adds a new function to a source file, the plugin looks for the closest existing functions in your project. It skips tests, `node_modules`, vendored, built, and generated code, and what your `.gitignore` lists. It then asks Jev whether the new function does the same job as one of them.
 
-If Jev is sure, a note tells the agent which function to reuse and where it is. It never blocks. A move, or a rename that keeps half the old body, is not flagged. If you asked for a separate copy, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
+If Jev is sure, a note tells the agent which function to reuse and where it is. It never blocks. A move, or a rename that keeps half the old body, is not flagged. If you asked for a separate copy, there is no note.
 
 ## Errors that are hidden
 
 When an agent changes a source file and adds a `catch`, an error default such as `??` or `|| []`, or an ignored error, or removes a `throw` or an error return, the plugin asks Jev whether the change hides a failure instead of handling it. Jev also sees the last command that failed. Errors that are rethrown, wrapped, really recovered from, or part of code a comment calls best effort are fine.
 
-If Jev is sure, a note tells the agent to let the error fail loudly or handle it for real. It never blocks. Tests, fixtures, mocks, test helpers, and generated code are skipped. If you asked to ignore the error, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
+If Jev is sure, a note tells the agent to let the error fail loudly or handle it for real. It never blocks. Tests, fixtures, mocks, test helpers, and generated code are skipped. If you asked to ignore the error, there is no note.
 
 ## Comments and docs that go stale
 
 When an agent changes code in a source file, the plugin sends Jev the comments on the changed function, and the sections of your markdown docs that name it. Jev decides if one of them is now wrong about the code. A comment the agent writes is checked too: does the code do what it says.
 
-If Jev is sure, a note tells the agent to update the comment or doc, or to ask you if the code is what is wrong. It never blocks. `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, and changelogs are left out. Tests, test helpers, and generated code are skipped. If you asked to change only the code, there is no note. With no key, an unreadable config, or when TypeSafe fails, there is no note.
+If Jev is sure, a note tells the agent to update the comment or doc, or to ask you if the code is what is wrong. It never blocks. `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, and changelogs are left out. Tests, test helpers, and generated code are skipped. If you asked to change only the code, there is no note.
 
 ## If Jev cannot decide
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, hidden-error, and stale-comment checks add a note only when Jev is sure. Those four notes share one request per change. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
+For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, hidden-error, and stale-comment checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
 
-A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
+A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not. With no key, an unreadable config, or a TypeSafe failure, those other checks add nothing.
 
 ## What this does not do
 
