@@ -392,7 +392,7 @@ describe('review', () => {
     const moved = 'test(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})';
 
     interface EditBody {
-      state: { purpose: string; user_messages?: string[]; edits: { path: string; title?: string; old: string; new: string; added?: string; moved?: string }[] };
+      state: { purpose: string; user_messages?: string[]; edits: { path: string; title?: string; old: string; new: string; added?: string; setup?: string; moved?: string }[] };
       questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }>;
     }
 
@@ -417,11 +417,16 @@ describe('review', () => {
       const run = editRun(weaken, {});
       expect(await run.result).toBeUndefined();
       const body = run.edit();
-      expect(body.state.edits).toEqual([{ path: '/repo/a.test.ts', title: 'adds', old: 'expect(add(1, 2)).toBe(3)', new: 'expect(add(1, 2)).toBeDefined()' }]);
+      expect(body.state.edits).toEqual([{ path: '/repo/a.test.ts', title: 'adds', old: 'expect(add(1, 2)).toBe(3)', new: 'expect(add(1, 2)).toBeDefined()', setup: 'import { add } from \'./add\';' }]);
       expect(body.state.user_messages).toBeUndefined();
+      expect(body.state.purpose).toContain('not judged');
       expect(Object.keys(body.questions).sort()).toEqual(['e0_change', 'e0_removes_test']);
       expect(body.questions.e0_change.type).toBe('choice');
       expect(Object.keys(body.questions.e0_change.criteria)).toEqual(['stronger', 'equivalent', 'weaker', 'inverted_or_removed', 'changed_value', 'unrelated']);
+      expect(body.questions.e0_change.criteria.unrelated).toContain('Removing or inlining a setup call is unrelated when every assertion is still there and still as strict.');
+      expect(body.questions.e0_change.criteria.weaker).toContain('a looser matcher');
+      expect(body.questions.e0_change.criteria.weaker).toContain('Removing or inlining a setup call is weaker only when an assertion would pass for the wrong reason without it.');
+      expect(body.questions.e0_change.criteria.inverted_or_removed).toContain('skipped, or commented out');
       expect(body.questions.e0_change.instructions).toContain('`edits[0].old`');
       expect(body.questions.e0_removes_test.type).toBe('noul');
       expect(JSON.stringify(body)).not.toContain('flaky');

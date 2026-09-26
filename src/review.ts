@@ -108,10 +108,10 @@ const CLAIMS: readonly Claim[] = [
 const CHANGES: Record<string, string> = {
   stronger: 'The new test checks everything the old one did, and more.',
   equivalent: 'The new test checks the same behavior with the same strictness, only written differently: renamed, reformatted, or refactored.',
-  weaker: 'The new test checks less: a looser matcher, fewer assertions, a wider tolerance, a partial match instead of an exact one, or a caught error instead of a failure.',
+  weaker: 'The new test checks less: a looser matcher, fewer assertions, a wider tolerance, a partial match instead of an exact one, or a caught error instead of a failure. Removing or inlining a setup call is weaker only when an assertion would pass for the wrong reason without it.',
   inverted_or_removed: 'An assertion now expects the opposite outcome, or an assertion or the whole test was removed, skipped, or commented out.',
   changed_value: 'The new test expects a different specific value, error, or output for the same input.',
-  unrelated: 'The change does not touch what the test checks, for example only setup, names, or imports.',
+  unrelated: 'The change does not touch what the test checks, for example only setup, names, or imports. Removing or inlining a setup call is unrelated when every assertion is still there and still as strict.',
 };
 
 // These block. stronger, equivalent, and unrelated do not.
@@ -188,6 +188,9 @@ interface SentEdit {
   old: string;
   new: string;
   added?: string;
+  // Text before the first test, from disk. Context only, not judged.
+  setup?: string;
+  setup_truncated?: true;
   // Tests added in other files by the same change, so Jev can judge a move as a replacement.
   moved?: string;
 }
@@ -284,7 +287,7 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
   const override = overrideRequest([...new Set(blockKeys)], deps.history);
   const all = [
     ...batches(prepared),
-    ...editBatches(edits, userMessages, files),
+    ...editBatches(edits, userMessages, files, read),
     ...gateRequests(gates, command, userMessages, deps.history?.lastFailure),
     ...specialRequests(specials, userMessages),
     ...(override ? [override.request] : []),
@@ -440,7 +443,7 @@ function batches(prepared: Prepared[]): Batch[] {
   return out;
 }
 
-function editBatches(edits: Edit[], userMessages: string[], files: TestFile[]): EditRequest[] {
+function editBatches(edits: Edit[], userMessages: string[], files: TestFile[], read: (path: string) => string | undefined): EditRequest[] {
   const out: EditRequest[] = [];
   for (let start = 0; start < edits.length; start += MAX_EDITS_PER_REQUEST) {
     const chunk = edits.slice(start, start + MAX_EDITS_PER_REQUEST);
@@ -450,12 +453,16 @@ function editBatches(edits: Edit[], userMessages: string[], files: TestFile[]): 
       const at = `edits[${sent.length}]`;
       const side = (text: string) => headTail(stripComments(text, edit.path), MAX_EDIT_SIDE_CHARS).text;
       const moved = movedTests(edit, edits, files);
+      const onDisk = read(edit.path);
+      const rawSetup = onDisk === undefined ? '' : splitCases(onDisk).setup;
+      const setup = rawSetup === '' ? undefined : headTail(rawSetup, MAX_EDIT_SIDE_CHARS);
       sent.push({
         path: edit.path,
         ...(edit.title ? { title: edit.title } : {}),
         old: side(edit.old),
         new: side(edit.new),
         ...(edit.added ? { added: side(edit.added) } : {}),
+        ...(setup ? { setup: setup.text, ...(setup.truncated ? { setup_truncated: true as const } : {}) } : {}),
         ...(moved ? { moved } : {}),
       });
       questions[`${edit.id}_change`] = {
@@ -482,7 +489,7 @@ function editBatches(edits: Edit[], userMessages: string[], files: TestFile[]): 
     }
     out.push({
       state: {
-        purpose: 'Decide whether each edit in `edits` weakens, removes, or changes what an existing test checks. `old` is the test before the edit and `new` is after it. Code comments were removed.',
+        purpose: 'Decide whether each edit in `edits` weakens, removes, or changes what an existing test checks. `old` is the test before the edit and `new` is after it. `setup`, when present, is setup read from the file on disk before the first test. It is context, not judged. Code comments were removed.',
         ...(userMessages.length > 0 ? { user_messages: userMessages } : {}),
         edits: sent,
       },
