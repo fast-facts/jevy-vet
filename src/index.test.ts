@@ -419,7 +419,7 @@ describe('plugin', () => {
       const bodies: string[] = [];
       await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
         await hooks['chat.message']({ sessionID: 's' }, message('Allow any test you write.'));
-        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('ask the user');
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
         // The only message came before the block, so nothing is asked and it is blocked again.
         await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
         expect(bodies.some(body => body.includes('"blocks"'))).toBe(false);

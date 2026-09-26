@@ -122,7 +122,9 @@ The turn is already over, so nothing is blocked. When Jev is sure, the plugin se
 
 A block message lists each test: the file, the test, the rule it broke in one plain line, the lines that show it, and what to do next. Only lines that are really in the test are shown. At most five tests are listed. It never tells the agent to delete a test or to leave it out.
 
-It also tells the agent it can ask you. If you allow the change in a later message, the next try goes through. Only your messages after the block count, and a subagent's block is answered in the session you talk to.
+The first block keeps that next step and does not ask you yet. It tells the agent to double-check, then retry with `Jevy reason:` and a clear, detailed reason: why this exact change is right, and the fact that answers the denial. That line is for Jev only. It is not written or run. Jev allows the retry only when the reason is strong enough. If Jev does not accept it, the agent must stop and ask you, with no second reason line.
+
+If you allow the change in a later message, the next try goes through with no reason line. Only your messages after the block count, and a subagent's block is answered in the session you talk to.
 
 After three blocks in a row on the same test, file, or command, the message tells the agent to stop retrying and ask you. One that passes starts the count over.
 

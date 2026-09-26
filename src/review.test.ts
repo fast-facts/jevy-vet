@@ -308,9 +308,10 @@ describe('review', () => {
       '  Copied expectation: The expected value is computed with the same logic as the code under test.',
       '  evidence: test(\'doubles\', () => { expect(twice(2)).toBe(4) })',
       '  next: Use a literal or a worked example as the expected value.',
-      'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.',
+      'Double-check the change and reevaluate whether it is really the best course. If it still is, retry with one line at the start: `Jevy reason:` followed by a clear, detailed reason. Say why this exact change is right, and name the fact that answers the denial. This line is for Jev only. It will not be written into a file and it will not be executed.',
     ].join('\n'));
     expect(result).not.toMatch(/do not add|delete/i);
+    expect(result).not.toContain('ask the user');
   });
 
   test('reads setup and imports from the file on disk for an edit, but judges only newString', async () => {
@@ -441,7 +442,7 @@ describe('review', () => {
         '  was: expect(add(1, 2)).toBe(3)',
         '  now: expect(add(1, 2)).toBeDefined()',
         '  next: Fix the code under test so the old check passes. If the old test is wrong, stop and ask the user before you change it.',
-        'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.',
+        'Double-check the change and reevaluate whether it is really the best course. If it still is, retry with one line at the start: `Jevy reason:` followed by a clear, detailed reason. Say why this exact change is right, and name the fact that answers the denial. This line is for Jev only. It will not be written into a file and it will not be executed.',
       ].join('\n'));
       expect(result).not.toMatch(/delete|remove the test/i);
     });
@@ -624,7 +625,10 @@ describe('unsure tests, user allows, and retry loops', () => {
     const h = history([], ['Write tests for add.'], 1);
     const bad = { t0_passes_on_empty: { type: 'noul', noul: 0.9 } };
     const first = await run(bad, { history: h }).result;
-    expect(first).toContain('If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.');
+    expect(first).toContain('Double-check the change and reevaluate whether it is really the best course.');
+    expect(first).toContain('`Jevy reason:`');
+    expect(first).toContain('It will not be written into a file and it will not be executed.');
+    expect(first).not.toContain('ask the user');
     const block = h.blocks.get('src/a.test.ts\ntest "adds"');
     expect(block?.count).toBe(1);
     expect(block?.atMessage).toBe(1);
@@ -770,7 +774,7 @@ describe('changes that weaken a check', () => {
       '  Weakened check: The change makes a CI, test, lint, or type check weaker, or lets it be skipped.',
       '  now: continue-on-error: true',
       '  next: Keep the check as it was and fix the code it fails on. If the check itself is wrong, stop and ask the user before you change it.',
-      'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.',
+      'Double-check the change and reevaluate whether it is really the best course. If it still is, retry with one line at the start: `Jevy reason:` followed by a clear, detailed reason. Say why this exact change is right, and name the fact that answers the denial. This line is for Jev only. It will not be written into a file and it will not be executed.',
     ].join('\n'));
     expect(result).not.toMatch(/delete|remove the test/i);
   });
@@ -964,7 +968,7 @@ describe('changes that weaken a check', () => {
         '  Bypassed check: The command skips or weakens a CI, test, lint, or type check, or a git hook.',
         '  command: git commit --no-verify -m "wip"',
         '  next: Run the checks as they are and fix what fails. If a check or hook is wrong, stop and ask the user before you skip it.',
-        'If you think Jevy is wrong, ask the user. If they allow it, run it again and it will go through.',
+        'Double-check the change and reevaluate whether it is really the best course. If it still is, retry with one line at the start: `Jevy reason:` followed by a clear, detailed reason. Say why this exact change is right, and name the fact that answers the denial. This line is for Jev only. It will not be written into a file and it will not be executed.',
       ].join('\n'));
     });
 
@@ -1084,7 +1088,7 @@ describe('changes that special-case a test', () => {
       '  special-cased: src/price.ts:2 if (qty === 42) return 210;',
       '  test: src/price.test.ts:4 expect(total(42)).toBe(210);',
       '  next: Implement the behavior for any input, not only the values the test uses. If a stub or a hard-coded value is meant, stop and ask the user.',
-      'If you think Jevy is wrong, ask the user. If they allow it, write it again and it will go through.',
+      'Double-check the change and reevaluate whether it is really the best course. If it still is, retry with one line at the start: `Jevy reason:` followed by a clear, detailed reason. Say why this exact change is right, and name the fact that answers the denial. This line is for Jev only. It will not be written into a file and it will not be executed.',
     ].join('\n'));
   });
 
@@ -1186,5 +1190,119 @@ describe('changes that special-case a test', () => {
     expect(await asked.result).toBeUndefined();
     expect(asked.bodies).toHaveLength(0);
     expect(asked.used.logs).toEqual(['project index not ready; no special-case check for this change']);
+  });
+});
+
+describe('reason line', () => {
+  const WEAK = 'test(\'adds\', () => { expect(add(1, 2)).toBeDefined() })';
+  const REASON = 'Jevy reason: defined is the right check because add returns a number, not 3';
+  const denied = { t0_passes_on_empty: { type: 'noul', noul: 0.95, confidence: 0.95 } };
+  const accepted = { reason_approves: { type: 'noul', noul: 0.9, confidence: 0.9 } };
+
+  function judge(bodies: string[], reasonAnswer: Record<string, unknown>) {
+    return deps((_url, init) => {
+      const body = String(init?.body);
+      bodies.push(body);
+      if (body.includes('reason_approves')) return Promise.resolve(jsonResponse({ answers: reasonAnswer }));
+      return Promise.resolve(jsonResponse({ answers: denied }));
+    });
+  }
+
+  test('a first denial says to double-check and add a reason line that is not saved or run', async () => {
+    const result = await review('write', { filePath: 'src/a.test.ts', content: WEAK }, deps(() => Promise.resolve(jsonResponse({ answers: denied }))));
+    expect(result).toContain('next: Compare the result with a specific expected value.');
+    expect(result).toContain('Double-check the change and reevaluate whether it is really the best course.');
+    expect(result).toContain('`Jevy reason:`');
+    expect(result).toContain('a clear, detailed reason');
+    expect(result).toContain('This line is for Jev only. It will not be written into a file and it will not be executed.');
+    expect(result).not.toContain('ask the user');
+    expect(result).not.toMatch(/delete|leave it out/i);
+  });
+
+  test('a strong reason allows a denied file change and is not written into the file', async () => {
+    const bodies: string[] = [];
+    const used = judge(bodies, accepted);
+    const first = { filePath: 'src/a.test.ts', content: `${REASON}\n${WEAK}` };
+    expect(await review('write', first, used)).toBeUndefined();
+    expect(first.content).toBe(WEAK);
+    const denial = bodies.find(body => body.includes('"files"')) ?? '';
+    expect(denial).not.toContain(REASON);
+    const reasonBody = JSON.parse(bodies.find(body => body.includes('reason_approves')) ?? '{}') as {
+      state: { reason: string; denials: { denial: string; change: string }[]; user_messages?: string[] };
+      questions: { reason_approves: { instructions: string; criteria: { true: string; false: string } } };
+    };
+    expect(reasonBody.state.reason).toBe(REASON);
+    expect(reasonBody.state.reason).not.toContain('toBeDefined');
+    expect(reasonBody.state.denials[0]?.change).toContain('toBeDefined');
+    expect(reasonBody.state.denials[0]?.denial).toContain('Passes on an empty result');
+    expect(reasonBody.state.user_messages).toBeUndefined();
+    expect(reasonBody.questions.reason_approves.instructions).toContain('every');
+    expect(reasonBody.questions.reason_approves.criteria.false).toContain('does not answer a denial');
+    const second = { filePath: 'src/a.test.ts', content: `Jevy reason: the spec only requires a number here\n${WEAK}` };
+    expect(await review('write', second, used)).toBeUndefined();
+    expect(bodies.some(body => body.includes('the spec only requires a number'))).toBe(true);
+    expect(second.content).toBe(WEAK);
+  });
+
+  test('a strong reason on a bash command is not executed', async () => {
+    const bodies: string[] = [];
+    const args = { command: 'Jevy reason: this repo has no pre-commit hook\ngit commit --no-verify -m "wip"', workdir: '/repo' };
+    const used = deps((_url, init) => {
+      const body = String(init?.body);
+      bodies.push(body);
+      if (body.includes('reason_approves')) return Promise.resolve(jsonResponse({ answers: accepted }));
+      return Promise.resolve(jsonResponse({ answers: { b0_weakens_gate: { type: 'noul', noul: 0.95, confidence: 0.95 } } }));
+    });
+    expect(await review('bash', args, used)).toBeUndefined();
+    expect(args.command).toBe('git commit --no-verify -m "wip"');
+    expect(args.command).not.toContain('Jevy reason:');
+    const gate = JSON.parse(bodies.find(body => body.includes('b0_weakens_gate')) ?? '{}') as { state: { command?: { command: string } } };
+    expect(gate.state.command?.command).toBe('git commit --no-verify -m "wip"');
+    const reasonBody = JSON.parse(bodies.find(body => body.includes('reason_approves')) ?? '{}') as { state: { reason: string; denials: { change: string }[] } };
+    expect(reasonBody.state.reason).toBe('Jevy reason: this repo has no pre-commit hook');
+    expect(reasonBody.state.denials[0]?.change).toBe('git commit --no-verify -m "wip"');
+  });
+
+  test('a weak or rejected reason blocks and tells the agent to ask the user, with no further reason retry', async () => {
+    for (const answer of [{ noul: 0.95, confidence: 0.5 }, { noul: 0.6, confidence: 0.9 }, { noul: 0.95 }]) {
+      const args = { filePath: 'src/a.test.ts', content: `Jevy reason: cleanup\n${WEAK}` };
+      const result = await review('write', args, deps(() => Promise.resolve(jsonResponse({
+        answers: { ...denied, reason_approves: { type: 'noul', ...answer } },
+      }))));
+      expect(result).toContain('Jev did not accept this reason. Stop retrying it. Ask the user to allow it. If they allow it, try again and it will go through.');
+      expect(result).not.toContain('Jevy reason:');
+      expect(result).not.toMatch(/delete|leave it out/i);
+      expect(args.content).toBe(WEAK);
+    }
+  });
+
+  test('a change the user already asked for goes through with no reason line', async () => {
+    const { disk } = memoryDisk({ '/repo/a.test.ts': 'test(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})' });
+    const bodies: string[] = [];
+    const used = deps((_url, init) => {
+      bodies.push(String(init?.body));
+      return Promise.resolve(jsonResponse({ answers: {
+        e0_change: { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.92 }, confidence: 0.9 },
+        e0_user_asked: { type: 'noul', noul: 0.5 },
+      } }));
+    }, { key: 'ts_secret' }, disk);
+    used.userMessages = ['Loosen this check.'];
+    const args = { filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: 'expect(add(1, 2)).toBeDefined()' };
+    expect(await review('edit', args, used)).toBeUndefined();
+    expect(bodies.some(body => body.includes('reason_approves'))).toBe(false);
+    expect(args.newString).toBe('expect(add(1, 2)).toBeDefined()');
+  });
+
+  test('does not read a reason from the user message', async () => {
+    const bodies: string[] = [];
+    const used = deps((_url, init) => {
+      bodies.push(String(init?.body));
+      return Promise.resolve(jsonResponse({ answers: { ...denied, t0_user_asked: { type: 'noul', noul: 0.1 } } }));
+    });
+    used.userMessages = ['Jevy reason: the old check is wrong'];
+    const result = await review('write', { filePath: 'src/a.test.ts', content: WEAK }, used);
+    expect(result).toContain('`Jevy reason:`');
+    expect(result).not.toContain('Jev did not accept this reason');
+    expect(bodies.some(body => body.includes('reason_approves'))).toBe(false);
   });
 });

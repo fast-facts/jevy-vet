@@ -235,7 +235,26 @@ interface GateRequest {
   questions: Record<string, Question>;
 }
 
+// Before comments are stripped, so this line is not judged, written, or run.
+const REASON_MARK = 'Jevy reason:';
+const REASON_RETRY = 'Double-check the change and reevaluate whether it is really the best course. If it still is, retry with one line at the start: `Jevy reason:` followed by a clear, detailed reason. Say why this exact change is right, and name the fact that answers the denial. This line is for Jev only. It will not be written into a file and it will not be executed.';
+const REASON_REJECTED = 'Jev did not accept this reason. Stop retrying it. Ask the user to allow it. If they allow it, try again and it will go through.';
+
+function pullReason(tool: string, args: unknown): string | undefined {
+  if (!isRecord(args)) return;
+  const field = tool === 'write' ? 'content' : tool === 'edit' ? 'newString' : tool === 'apply_patch' ? 'patchText' : tool === 'bash' ? 'command' : '';
+  if (field === '') return;
+  const text = args[field];
+  if (typeof text !== 'string') return;
+  const end = text.indexOf('\n');
+  const first = (end === -1 ? text : text.slice(0, end)).trim();
+  if (!first.startsWith(REASON_MARK)) return;
+  args[field] = end === -1 ? '' : text.slice(end + 1);
+  return first;
+}
+
 export async function review(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
+  const reason = pullReason(tool, args);
   const read = reader(deps.disk);
   const files = testFilesFrom(tool, args);
   const edits: Edit[] = editsFrom(tool, args, read).map((pair, n) => {
@@ -317,6 +336,44 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
     }
     blocked.push(finding);
   }
+  let reasonRejected = false;
+  if (blocked.length > 0 && reason !== undefined) {
+    const changeOf = new Map<string, string>();
+    for (const item of prepared) for (const test of item.cases) changeOf.set(test.key, test.test);
+    for (const edit of edits) changeOf.set(edit.key, edit.new);
+    for (const gate of gates) changeOf.set(gate.key, gate.new);
+    if (command) changeOf.set(command.key, command.command);
+    for (const item of specials) changeOf.set(item.key, item.new);
+    const questions: Record<string, Question> = {
+      reason_approves: {
+        type: 'noul',
+        instructions: 'Is the reason in `reason` strong enough to approve every denied change in `denials`?',
+        criteria: {
+          true: 'The reason shows why this exact change is right and names the fact that answers each denial.',
+          false: 'The reason is missing, only says the test failed, says to make the tests pass, says cleanup, only restates the diff, or does not answer a denial.',
+        },
+      },
+    };
+    const request = {
+      state: {
+        purpose: 'A change was denied. Decide whether the reason in `reason` is strong enough to approve every denial in `denials`. `reason` is only the reason line from the change. `change` is the denied change. One denial the reason does not answer means no.',
+        reason,
+        denials: blocked.map(item => ({
+          path: item.path,
+          test: item.test,
+          denial: item.fails.join(' '),
+          change: headTail(changeOf.get(item.key) ?? '', MAX_EDIT_SIDE_CHARS).text,
+        })),
+      },
+      questions,
+    };
+    const answered = await callTypeSafe(once, settings, request, 'The reason was not accepted.');
+    const answer = answered?.reason_approves;
+    const score = noulScore(answer);
+    const confidence = isRecord(answer) ? answer.confidence : undefined;
+    if (typeof score === 'number' && score >= 0.8 && typeof confidence === 'number' && confidence >= 0.8) blocked.length = 0;
+    else reasonRejected = true;
+  }
   const history = deps.history;
   if (history) {
     const blockedKeys = new Set(blocked.map(item => item.key));
@@ -334,7 +391,7 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
       history.blocks.delete(oldest);
     }
   }
-  if (blocked.length > 0) return blockText(blocked, history);
+  if (blocked.length > 0) return blockText(blocked, history, reasonRejected);
   const unsure = findings.filter(item => !item.block);
   if (unsure.length > 0) deps.warn?.(noteText(unsure));
   return;
@@ -688,21 +745,23 @@ function testName(title: string | undefined, fallback: string): string {
 
 const NOUNS: Record<Finding['kind'], string> = { write: 'test', edit: 'test', gate: 'change', command: 'command', reuse: 'function', special: 'change', claim: 'claim', hidden: 'change', stale: 'change' };
 
-function blockText(blocked: Finding[], history: History | undefined): string {
+function blockText(blocked: Finding[], history: History | undefined, reasonRejected: boolean): string {
   const countOf = (item: Finding) => history?.blocks.get(item.key)?.count ?? 0;
   const kinds = new Set(blocked.map(item => item.kind));
   const again = kinds.has('command') ? 'run it again' : 'write it again';
   const looping = blocked.some(item => countOf(item) >= LOOP_BLOCKS);
-  const ask = looping ? `If the user allows it, ${again} and it will go through.` : `If you think Jevy is wrong, ask the user. If they allow it, ${again} and it will go through.`;
-  return [
+  const lines = [
     `Jevy blocked this ${blockedWhat(kinds)}.`,
     ...listed(blocked, item => {
       const count = countOf(item);
       if (count >= LOOP_BLOCKS) return `This ${NOUNS[item.kind]} was blocked ${count} times in a row. Stop retrying it. Ask the user how to go on, or ask them to allow it.`;
+      if (reasonRejected) return REASON_REJECTED;
       return item.next;
     }),
-    ask,
-  ].join('\n');
+  ];
+  if (reasonRejected && looping) lines.push(REASON_REJECTED);
+  else if (!reasonRejected) lines.push(looping ? `If the user allows it, ${again} and it will go through.` : REASON_RETRY);
+  return lines.join('\n');
 }
 
 // A command never comes with a file change. They are different tools.
