@@ -1,5 +1,5 @@
 import { isGenerated } from './context.ts';
-import { afterChange, askedFor, callTypeSafe, cut, type Failure, type Finding, ignoredPath, listed, logOnce, noulIsSure, type Question, reader, type ReviewDeps, shownPath, sides, userAsked } from './jev.ts';
+import { afterChange, askedFor, callTypeSafe, cut, type Failure, type Finding, ignoredPath, latestUserMessages, listed, logOnce, noulIsSure, type Question, reader, type ReviewDeps, shownPath, sides, userAsked } from './jev.ts';
 import { type Change, changesFrom, definitionsIn, isDefinitionFile, isTestSupport } from './subjects.ts';
 
 // The hidden-error check. It notes and never blocks: code that keeps going after a failure is sometimes the design.
@@ -95,7 +95,7 @@ export async function prepareHiddenErrors(tool: string, args: unknown, deps: Hid
   if (settings.error || settings.key.trim() === '') return;
 
   const once = logOnce(deps);
-  const userMessages = deps.userMessages ?? [];
+  const userMessages = latestUserMessages(deps.userMessages ?? []);
   const questions: Record<string, Question> = {};
   for (const n of found.keys()) {
     const at = `\`changes[${n}]\``;

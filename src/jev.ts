@@ -72,6 +72,14 @@ export interface Finding {
 export type Question = { type: 'noul'; instructions: string; criteria: { true: string; false: string } } |
   { type: 'choice'; instructions: string; criteria: Record<string, string> };
 
+export const MAX_LATEST_MESSAGE_CHARS = 1000;
+
+// Code judgments see only the latest user message, so history does not repeat in every request.
+export function latestUserMessages(messages: string[]): string[] {
+  if (messages.length === 0) return [];
+  return [headTail(messages[messages.length - 1] ?? '', MAX_LATEST_MESSAGE_CHARS).text];
+}
+
 export function userAsked(change: string, asks: string): Question {
   return {
     type: 'noul',

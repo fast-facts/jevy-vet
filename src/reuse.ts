@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 import { headTail } from './context.ts';
-import { askedFor, callTypeSafe, cut, type Finding, ignoredPath, listed, logOnce, noulIsSure, noulScore, type Question, reader, type ReviewDeps, userAsked, withoutComments } from './jev.ts';
+import { askedFor, callTypeSafe, cut, type Finding, ignoredPath, latestUserMessages, listed, logOnce, noulIsSure, noulScore, type Question, reader, type ReviewDeps, userAsked, withoutComments } from './jev.ts';
 import { indexFromDisk, type SourceFile } from './project.ts';
 import { changesFrom, type Definition, definitionsIn, isDefinitionFile } from './subjects.ts';
 
@@ -126,7 +126,7 @@ export async function prepareReuse(tool: string, args: unknown, deps: ReviewDeps
   if (asked.length === 0) return;
 
   const once = logOnce(deps);
-  const userMessages = deps.userMessages ?? [];
+  const userMessages = latestUserMessages(deps.userMessages ?? []);
   const show = (path: string) => relative(disk.root, path) || path;
   const questions: Record<string, Question> = {};
   for (const [n, { matches }] of asked.entries()) {

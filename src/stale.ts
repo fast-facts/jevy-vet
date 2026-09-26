@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { headTail, isGenerated } from './context.ts';
-import { afterChange, askedFor, callTypeSafe, cut, type Finding, ignoredPath, listed, logOnce, noulIsSure, type Question, reader, type ReviewDeps, shownPath, sides, userAsked } from './jev.ts';
+import { afterChange, askedFor, callTypeSafe, cut, type Finding, ignoredPath, latestUserMessages, listed, logOnce, noulIsSure, type Question, reader, type ReviewDeps, shownPath, sides, userAsked } from './jev.ts';
 import { indexFromDisk } from './project.ts';
 import { type Change, changesFrom, type Definition, definitionsIn, isCommentLine, isDefinitionFile, isTestSupport } from './subjects.ts';
 
@@ -159,7 +159,7 @@ export async function prepareStaleDocs(tool: string, args: unknown, deps: Review
   if (asked.length === 0) return;
 
   const once = logOnce(deps);
-  const userMessages = deps.userMessages ?? [];
+  const userMessages = latestUserMessages(deps.userMessages ?? []);
   const questions: Record<string, Question> = {};
   for (const [k, comment] of asked.entries()) {
     const at = `\`changes[${comment.change}]\``;

@@ -1,5 +1,5 @@
 import { headTail, sentencesOf } from './context.ts';
-import { askedFor, callTypeSafe, choiceLevel, cut, type Finding, isRecord, listed, logOnce, MAX_LISTED, oneLine, type Question, type ReviewDeps, userAsked } from './jev.ts';
+import { askedFor, callTypeSafe, choiceLevel, cut, type Finding, isRecord, latestUserMessages, listed, logOnce, MAX_LISTED, oneLine, type Question, type ReviewDeps, userAsked } from './jev.ts';
 
 // The claim check. It runs when the session goes idle, so the turn is over and nothing can be blocked.
 const MAX_CLAIMS = 8;
@@ -66,7 +66,7 @@ export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ f
   if (settings.error || settings.key.trim() === '') return;
 
   const once = logOnce(deps);
-  const userMessages = deps.userMessages ?? [];
+  const userMessages = latestUserMessages(deps.userMessages ?? []);
   // Earlier committed work still backs a summary. Skipped when empty so the first turn is unchanged.
   const past = deps.pastSteps ?? [];
   const hasPast = past.length > 0;

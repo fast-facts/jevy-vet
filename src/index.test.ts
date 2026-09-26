@@ -254,7 +254,7 @@ describe('plugin', () => {
     } finally {
       rmSync(project, { recursive: true, force: true });
     }
-    expect(editBodies().map(body => body.state.user_messages)).toEqual([['two', 'three', 'Change add so 1 + 2 is 4.'], undefined, undefined]);
+    expect(editBodies().map(body => body.state.user_messages)).toEqual([['Change add so 1 + 2 is 4.'], undefined, undefined]);
     expect(bodies.join('\n')).not.toContain('hint');
     expect(bodies.join('\n')).not.toContain('IGNORED_PART');
     expect(bodies.join('\n')).not.toContain('FILE_PART');

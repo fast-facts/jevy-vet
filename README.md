@@ -94,7 +94,7 @@ The message shows the lines that changed. It tells the agent to fix the code, or
 
 ## When you asked for the change
 
-Your own words allow the edit. This covers every check on this page. The plugin keeps your last three messages for that session, in memory only, and sends them with the edit so Jev can tell.
+Your own words allow the edit. This covers every check on this page. The plugin keeps your last three messages for that session, in memory only, and sends the latest one with the edit so Jev can tell.
 
 Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
 

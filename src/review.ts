@@ -1,5 +1,5 @@
 import { contextFor, type Disk, type FileContext, headTail } from './context.ts';
-import { afterChange, askedFor, callTypeSafe, choiceLevel, cut, type Failure, type Finding, findingLines, type History, ignoredPath, isRecord, type Level, listed, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulLevel, noulScore, oneLine, type Question, reader, type ReviewDeps, shownPath, sides, userAsked, withoutComments } from './jev.ts';
+import { afterChange, askedFor, callTypeSafe, choiceLevel, cut, type Failure, type Finding, findingLines, type History, ignoredPath, isRecord, latestUserMessages, type Level, listed, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulLevel, noulScore, oneLine, type Question, reader, type ReviewDeps, shownPath, sides, userAsked, withoutComments } from './jev.ts';
 import { INDEX_WAIT_MS, indexFromDisk, type ProjectIndex, type SourceFile } from './project.ts';
 import { changesFrom, type Command, commandFrom, definitionsIn, type EditPair, editsFrom, isDefinitionFile, isGatePath, isTestSupport, type Literal, literalsIn, splitCases, stripComments, type TestFile, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
@@ -275,7 +275,7 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
   const prepared = prepare(files, deps.disk);
   // Reads the index before the calls start. Only a change that adds a value or a test-environment check gets here.
   const specials = await specialCasesWithWait(pending, deps);
-  const userMessages = deps.userMessages ?? [];
+  const userMessages = latestUserMessages(deps.userMessages ?? []);
   const blockKeys = [
     ...prepared.flatMap(item => item.cases.map(test => test.key)),
     ...edits.map(edit => edit.key),

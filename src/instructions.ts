@@ -1,6 +1,6 @@
 import { isAbsolute, relative } from 'node:path';
 import { headTail, type InstructionFile, sentencesOf } from './context.ts';
-import { callTypeSafe, ignoredPath, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulIsSure, noulScore, type Question, reader, type ReviewDeps, withoutComments } from './jev.ts';
+import { callTypeSafe, ignoredPath, latestUserMessages, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulIsSure, noulScore, type Question, reader, type ReviewDeps, withoutComments } from './jev.ts';
 import { type Settings } from './settings.ts';
 import { type Change, changesFrom } from './subjects.ts';
 
@@ -219,8 +219,8 @@ function sentenceRequest(chunk: Sentence[], userMessages: string[]): SentenceReq
   const user = chunk.some(sentence => sentence.from.startsWith('user_messages'));
   return {
     state: {
-      purpose: 'Decide which sentences are rules a coding agent must follow when it edits files. `from` is the instruction file or the user message the sentence comes from. `user_messages` gives the full messages for context.',
-      ...(user ? { user_messages: userMessages } : {}),
+      purpose: 'Decide which sentences are rules a coding agent must follow when it edits files. `from` is the instruction file or the user message the sentence comes from. `user_messages` gives the latest message for context.',
+      ...(user ? { user_messages: latestUserMessages(userMessages) } : {}),
       sentences: chunk.map(sentence => ({ from: sentence.from, text: sentence.text })),
     },
     questions,
