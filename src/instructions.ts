@@ -8,7 +8,8 @@ import { type Change, changesFrom } from './subjects.ts';
 // the user may have changed their mind in a way this plugin cannot see.
 const MAX_INSTRUCTIONS = 20;
 const MAX_FILE_SENTENCES = 150;
-const MAX_SENTENCES_PER_REQUEST = 50;
+const MAX_SENTENCES_PER_REQUEST = 100;
+const MAX_SENTENCE_CHARS = 200;
 const MAX_CACHED_SENTENCES = 2000;
 const MAX_CHANGES = 10;
 const MAX_WARNINGS = 5;
@@ -221,7 +222,7 @@ function sentenceRequest(chunk: Sentence[], userMessages: string[]): SentenceReq
     state: {
       purpose: 'Decide which sentences are rules a coding agent must follow when it edits files. `from` is the instruction file or the user message the sentence comes from. `user_messages` gives the latest message for context.',
       ...(user ? { user_messages: latestUserMessages(userMessages) } : {}),
-      sentences: chunk.map(sentence => ({ from: sentence.from, text: sentence.text })),
+      sentences: chunk.map(sentence => ({ from: sentence.from, text: headTail(sentence.text, MAX_SENTENCE_CHARS).text })),
     },
     questions,
   };
