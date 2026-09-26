@@ -5,8 +5,12 @@ import { changesFrom, type Command, commandFrom, definitionsIn, type EditPair, e
 
 // Jev allows 32k tokens for state plus the longest question, and 64k for state plus all questions.
 // A token is at least 3 characters of code, so these stay well inside both.
-const MAX_CASE_CHARS = 12_000;
+const MAX_CASE_CHARS = 6_000;
 const MAX_STATE_CHARS = 72_000;
+// Re-cut per batch; contextFor() keeps larger limits for other callers.
+const MAX_BATCH_SETUP_CHARS = 2_000;
+const MAX_BATCH_CODE_CHARS = 6_000;
+const MAX_BATCH_CODE_FILE_CHARS = 4_000;
 const MAX_EDITS_PER_REQUEST = 25;
 // Both sides of each change, so five stay inside MAX_STATE_CHARS.
 const MAX_GATES_PER_REQUEST = 5;
@@ -639,13 +643,27 @@ function emptyBatch(): Batch {
 }
 
 function fileEntry(item: Prepared): SentFile {
+  const setup = headTail(item.context.setup, MAX_BATCH_SETUP_CHARS);
   return {
     path: item.file.path,
-    setup: item.context.setup,
-    ...(item.context.setupTruncated ? { setup_truncated: true } : {}),
-    code_under_test: item.context.code,
+    setup: setup.text,
+    ...(item.context.setupTruncated || setup.truncated ? { setup_truncated: true } : {}),
+    code_under_test: batchCode(item.context.code),
     cases: [],
   };
+}
+
+function batchCode(code: FileContext['code']): FileContext['code'] {
+  const out: FileContext['code'] = [];
+  let used = 0;
+  for (const entry of code) {
+    if (used >= MAX_BATCH_CODE_CHARS) break;
+    const budget = Math.min(MAX_BATCH_CODE_FILE_CHARS, MAX_BATCH_CODE_CHARS - used);
+    const cut = headTail(entry.text, budget);
+    out.push({ path: entry.path, text: cut.text, truncated: entry.truncated || cut.truncated });
+    used += cut.text.length;
+  }
+  return out;
 }
 
 function testFindings(prepared: Prepared[], answers: Record<string, unknown>): Finding[] {
