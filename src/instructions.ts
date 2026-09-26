@@ -227,11 +227,33 @@ function sentenceRequest(chunk: Sentence[], userMessages: string[]): SentenceReq
   };
 }
 
+function pathsInInstruction(text: string): string[] {
+  const found: string[] = [];
+  const pattern = /(?:\.\/|\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]*|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/g;
+  for (const match of text.matchAll(pattern)) {
+    const token = match[0].replace(/\.+$/, '');
+    if (!/[A-Za-z]/.test(token)) continue;
+    if (token.includes('/') || /\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*$/.test(token)) found.push(token);
+  }
+  return found;
+}
+
+function pathApplies(changePath: string, instructionPath: string): boolean {
+  const segs = (path: string) => path.replaceAll('\\', '/').replace(/\/+/g, '/').replace(/^(?:\.\/|\/)+/, '').split('/').filter(seg => seg !== '');
+  const suffix = (path: string[], end: string[]) => end.length > 0 && end.length <= path.length && end.every((seg, n) => path[path.length - end.length + n] === seg);
+  const named = segs(instructionPath);
+  if (named.length === 0) return true;
+  const file = instructionPath.endsWith('/') ? segs(changePath).slice(0, -1) : segs(changePath);
+  return file.length > 0 && (suffix(file, named) || suffix(named, file));
+}
+
 function ruleRequest(changes: Change[], rules: Sentence[], userMessages: string[]): RuleRequest {
   const questions: Record<string, Question> = {};
   const side = (text: string, path: string) => headTail(withoutComments(text, path), MAX_EDIT_SIDE_CHARS).text;
   for (const j of changes.keys()) {
     for (const k of rules.keys()) {
+      const paths = pathsInInstruction(rules[k].text);
+      if (paths.length > 0 && !paths.some(path => pathApplies(changes[j].path, path))) continue;
       questions[`c${j}_i${k}_breaks`] = {
         type: 'noul',
         instructions: `Does the change in \`changes[${j}]\` violate the instruction in \`instructions[${k}].text\`?`,

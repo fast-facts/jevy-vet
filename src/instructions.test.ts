@@ -211,6 +211,41 @@ describe('instruction check', () => {
     expect(CLASSIFY_ON_MESSAGE).toBe(false);
   });
 
+  test('skips a file rule that does not name this change', async () => {
+    const cases = [
+      { rule: '- Do not add another export to `src/index.ts`.', file: '/repo/src/jev.ts', ask: false },
+      { rule: '- Do not add another export to `src/index.ts`.', file: '/repo/src/index.ts', ask: true },
+      { rule: '- Do not edit `./src/index.ts`.', file: '/repo/src/index.ts', ask: true },
+      { rule: '- Do not edit `index.ts`.', file: '/repo/src/index.ts', ask: true },
+      { rule: '- Do not edit `index.ts`.', file: '/repo/src/notindex.ts', ask: false },
+      { rule: '- Do not edit `src/index.ts` or `src/jev.ts`.', file: '/repo/src/jev.ts', ask: true },
+      { rule: '- Never touch the billing code.', file: '/repo/src/jev.ts', ask: true },
+      { rule: '- Do not edit `src/`.', file: '/repo/src/jev.ts', ask: true },
+      { rule: '- Do not edit `other/`.', file: '/repo/src/jev.ts', ask: false },
+    ];
+    for (const item of cases) {
+      const { sent, fetchImpl } = judge(breaks(() => true));
+      const note = await checkInstructions('edit', { filePath: item.file, oldString: 'a', newString: 'b' }, instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': item.rule } }));
+      const questions = sent[1]?.questions ?? {};
+      expect({ file: item.file, rule: item.rule, asked: 'c0_i0_breaks' in questions }).toEqual({ file: item.file, rule: item.rule, asked: item.ask });
+      if (item.ask) expect(note).toContain(`may break "${item.rule.slice(2)}"`);
+      else {
+        expect(note).toBeUndefined();
+        expect(Object.keys(questions)).toEqual([]);
+        expect(sent[1]?.state.changes).toEqual([{ path: item.file, old: 'a', new: 'b' }]);
+      }
+    }
+  });
+
+  test('asks the rule that names no file when another rule names a different file', async () => {
+    const { sent, fetchImpl } = judge(breaks(() => true));
+    const files = { '/repo/AGENTS.md': '- Do not edit `src/index.ts`.\n- Never touch the billing code.' };
+    const note = await checkInstructions('edit', { filePath: '/repo/src/billing.ts', oldString: 'a', newString: 'b' }, instructionDeps(fetchImpl, { files }));
+    expect(Object.keys(sent[1]?.questions ?? {})).toEqual(['c0_i1_breaks']);
+    expect(note).toContain('may break "Never touch the billing code."');
+    expect(note).not.toContain('src/index.ts');
+  });
+
   const EARLY_MESSAGES = ['Do not change `src/api.ts` signatures.'];
   const EARLY_SETTINGS: Settings = { key: 'ts_secret', baseUrl: '', path: '/cfg' };
 
