@@ -1,4 +1,5 @@
 import { type ReviewDeps } from './jev.ts';
+import { type AsyncDisk } from './project.ts';
 import { type Settings } from './settings.ts';
 
 export function deps(fetchImpl: ReviewDeps['fetch'], settings: Partial<Settings> = { key: 'ts_secret' }, disk?: ReviewDeps['disk']): ReviewDeps & { logs: string[]; loads: number } {
@@ -43,6 +44,51 @@ export function memoryDisk(files: Record<string, string>, root = '/repo') {
       list(dir: string) {
         return Object.keys(files).filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/')).map(path => path.slice(dir.length + 1));
       },
+    },
+  };
+}
+
+// Async disk over an in-memory tree. stat versions only move on write, so an
+// untouched file is read once and a written one is re-read.
+export function asyncTreeDisk(files: Record<string, string>, root = '/repo') {
+  const listCalls: string[] = [];
+  const readCalls: string[] = [];
+  const versions = new Map<string, number>();
+  let clock = 0;
+  const disk: AsyncDisk = {
+    root,
+    read(path) {
+      readCalls.push(path);
+      return Promise.resolve(files[path]);
+    },
+    list(dir) {
+      listCalls.push(dir);
+      const names = new Map<string, boolean>();
+      for (const path of Object.keys(files)) {
+        if (!path.startsWith(`${dir}/`)) continue;
+        const rest = path.slice(dir.length + 1);
+        const slash = rest.indexOf('/');
+        if (slash === -1) names.set(rest, false);
+        else {
+          const top = rest.slice(0, slash);
+          if (!names.has(top)) names.set(top, true);
+        }
+      }
+      return Promise.resolve([...names].map(([name, isDir]) => ({ name, dir: isDir })));
+    },
+    stat(path) {
+      const text = files[path];
+      if (text === undefined) return Promise.resolve(undefined);
+      return Promise.resolve({ mtimeMs: versions.get(path) ?? 0, size: text.length });
+    },
+  };
+  return {
+    disk,
+    listCalls,
+    readCalls,
+    write(path: string, text: string) {
+      files[path] = text;
+      versions.set(path, ++clock);
     },
   };
 }

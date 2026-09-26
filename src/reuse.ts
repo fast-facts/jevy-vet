@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve } from 'node:path';
-import { headTail, type SourceFile, sourceFiles } from './context.ts';
+import { headTail } from './context.ts';
 import { askedFor, callTypeSafe, cut, type Finding, ignoredPath, listed, logOnce, noulIsSure, noulScore, type Question, reader, type ReviewDeps, userAsked, withoutComments } from './jev.ts';
+import { indexFromDisk, type SourceFile } from './project.ts';
 import { changesFrom, type Definition, definitionsIn, isDefinitionFile } from './subjects.ts';
 
 // Notes and never blocks. Candidates are the closest word matches, so a better one can be missed.
@@ -82,8 +83,11 @@ export async function checkReuse(tool: string, args: unknown, deps: ReviewDeps):
 
   // Let the tool start. The changed files were read above and are skipped below.
   await new Promise(resolve => setTimeout(resolve, 0));
+  const project = deps.project ?? indexFromDisk(disk);
+  const indexed = await project.sourceFiles(changed).catch(() => undefined);
+  if (!indexed) return;
   const pool: Found[] = [];
-  for (const file of [...before, ...sourceFiles(disk, changed)]) {
+  for (const file of [...before, ...indexed]) {
     for (const item of definitionsIn(file.text, file.path)) {
       // Code this call removes is not there to reuse.
       if (changed.has(file.path) && removedNames.has(item.name)) continue;

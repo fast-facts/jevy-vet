@@ -1,5 +1,6 @@
-import { contextFor, type Disk, type FileContext, headTail, relatedTests, type SourceFile } from './context.ts';
+import { contextFor, type Disk, type FileContext, headTail } from './context.ts';
 import { afterChange, askedFor, callTypeSafe, choiceLevel, cut, type Failure, type Finding, findingLines, type History, ignoredPath, isRecord, type Level, listed, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulLevel, noulScore, oneLine, type Question, reader, type ReviewDeps, shownPath, sides, userAsked, withoutComments } from './jev.ts';
+import { INDEX_WAIT_MS, indexFromDisk, type ProjectIndex, type SourceFile } from './project.ts';
 import { changesFrom, type Command, commandFrom, definitionsIn, type EditPair, editsFrom, isDefinitionFile, isGatePath, isTestSupport, type Literal, literalsIn, splitCases, stripComments, type TestFile, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
 // Jev allows 32k tokens for state plus the longest question, and 64k for state plus all questions.
@@ -258,8 +259,8 @@ export async function review(tool: string, args: unknown, deps: ReviewDeps): Pro
 
   const once = logOnce(deps);
   const prepared = prepare(files, deps.disk);
-  // Walks the tests before the calls start. Only a change that adds a value or a test-environment check gets here.
-  const specials = specialCases(pending, deps.disk);
+  // Reads the index before the calls start. Only a change that adds a value or a test-environment check gets here.
+  const specials = await specialCasesWithWait(pending, deps);
   const userMessages = deps.userMessages ?? [];
   const blockKeys = [
     ...prepared.flatMap(item => item.cases.map(test => test.key)),
@@ -711,7 +712,7 @@ const SPECIAL_CRITERIA = {
 // Code that knows it runs under a test. A reason to ask Jev, never a finding by itself.
 const TEST_SIGNAL = /\b(?:NODE_ENV|JEST_WORKER_ID|VITEST|PYTEST_CURRENT_TEST|currentTestName|testing\.Testing)\b/;
 
-// A source change that adds a value or a test-environment check. Only these walk the tests.
+// A source change that adds a value or a test-environment check. Only these read the index.
 // path is relative to the project, with forward slashes, the same form the messages use.
 interface Pending {
   path: string;
@@ -746,7 +747,7 @@ interface SpecialRequest {
   questions: Record<string, Question>;
 }
 
-// Scope only, like touchesGates. A change that adds no value and no test-environment check costs no walk and no call.
+// Scope only, like touchesGates. A change that adds no value and no test-environment check costs no index read and no call.
 function specialEdits(tool: string, args: unknown, disk: Disk | undefined, read: (path: string) => string | undefined): Pending[] {
   if (!disk) return [];
   const out: Pending[] = [];
@@ -775,12 +776,43 @@ function specialEdits(tool: string, args: unknown, disk: Disk | undefined, read:
   return out;
 }
 
+// Retrieval only. It never blocks, notes, or allows. A shared index is awaited at most
+// INDEX_WAIT_MS, then the check is skipped. A one-off index is built fully instead.
+async function specialCasesWithWait(pending: Pending[], deps: ReviewDeps): Promise<Special[]> {
+  if (pending.length === 0) return [];
+  const project = deps.project ?? (deps.disk ? indexFromDisk(deps.disk) : undefined);
+  if (!project) return [];
+  if (deps.project) {
+    const ready = project.ensure().then(() => true, () => false);
+    const late = new Promise<boolean>(resolve => setTimeout(() => resolve(false), INDEX_WAIT_MS));
+    if (!await Promise.race([ready, late])) {
+      logOnce(deps).log?.('project index not ready; no special-case check for this change');
+      return [];
+    }
+  } else {
+    try {
+      await project.ensure();
+    } catch {
+      return [];
+    }
+  }
+  try {
+    return await specialCases(pending, project);
+  } catch {
+    return [];
+  }
+}
+
 // Retrieval only. It never blocks, notes, or allows.
-function specialCases(pending: Pending[], disk: Disk | undefined): Special[] {
-  if (!disk) return [];
+async function specialCases(pending: Pending[], project: ProjectIndex): Promise<Special[]> {
   const out: Special[] = [];
   for (const edit of pending) {
-    const tests = relatedTests(disk, edit.path);
+    let tests: SourceFile[];
+    try {
+      tests = await project.relatedTests(edit.path);
+    } catch {
+      continue;
+    }
     const hit = firstShared(edit.added, tests);
     const line = hit?.source.line ?? edit.signal;
     if (line === undefined || tests.length === 0) continue;
@@ -794,7 +826,7 @@ function specialCases(pending: Pending[], disk: Disk | undefined): Special[] {
       // A shared value picks the cases that use it. A test-environment check shares none, so the first case is enough.
       const picked = hit ? parts.filter(part => edit.added.some(item => part.includes(item.value))) : parts.slice(0, 1);
       for (const part of picked) {
-        cases.push({ path: shownPath(disk.root, test.path), test: headTail(part, MAX_SPECIAL_CASE_CHARS).text });
+        cases.push({ path: shownPath(project.root, test.path), test: headTail(part, MAX_SPECIAL_CASE_CHARS).text });
         if (cases.length >= MAX_SPECIAL_CASES) break;
       }
     }
@@ -807,7 +839,7 @@ function specialCases(pending: Pending[], disk: Disk | undefined): Special[] {
       new: withoutComments(edit.new, edit.path),
       ...(edit.numbered ? { line } : {}),
       code,
-      ...(hit ? { test: { path: shownPath(disk.root, hit.test.path), line: hit.at.line, code: hit.test.text.split('\n')[hit.at.line - 1]?.trim() ?? '' } } : {}),
+      ...(hit ? { test: { path: shownPath(project.root, hit.test.path), line: hit.at.line, code: hit.test.text.split('\n')[hit.at.line - 1]?.trim() ?? '' } } : {}),
       cases,
     });
   }

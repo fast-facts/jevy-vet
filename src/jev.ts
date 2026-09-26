@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { type Disk, headTail } from './context.ts';
+import { type ProjectIndex } from './project.ts';
 import { type Settings } from './settings.ts';
 import { type Change, stripComments } from './subjects.ts';
 
@@ -18,6 +19,8 @@ export interface ReviewDeps {
   log?: (message: string) => void;
   // Where to read the code under test. Without it, only the new text is sent.
   disk?: Disk;
+  // The shared project listing for retrieval. Without it, one is built from disk per call.
+  project?: ProjectIndex;
   // The user's latest messages in this session, oldest first. Empty when unknown.
   userMessages?: string[];
   // Earlier blocks, so the user can allow one and a retry loop is noticed.

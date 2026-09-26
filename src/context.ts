@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { isCodeFile, isTestPath, splitCases, type TestFile } from './subjects.ts';
+import { splitCases, type TestFile } from './subjects.ts';
 
 // Context read from disk for one test file. None of it is judged.
 interface Source {
@@ -63,6 +63,18 @@ function withSetup(setup: string, code: Source[]): FileContext {
 
 // Files that likely hold the code under test, best first.
 function candidates(testPath: string, source: string, disk: Disk): string[] {
+  if (extname(testPath) !== '.go') return candidatePaths(testPath, source, disk.root, []);
+  let names: string[];
+  try {
+    names = disk.list(dirname(testPath));
+  } catch {
+    names = [];
+  }
+  return candidatePaths(testPath, source, disk.root, names);
+}
+
+// Same mapping without disk access. goNames are the file names next to the test.
+export function candidatePaths(testPath: string, source: string, root: string, goNames: string[]): string[] {
   const dir = dirname(testPath);
   const ext = extname(testPath);
   const out: string[] = [];
@@ -73,18 +85,12 @@ function candidates(testPath: string, source: string, disk: Disk): string[] {
     const dirs = basename(dir) === '__tests__' ? [dirname(dir), dir] : [dir];
     for (const base of dirs) out.push(...jsFiles(join(base, stem)));
   } else if (ext === '.py') {
-    for (const mod of pyImports(source)) out.push(...pyFiles(mod, dir, disk.root));
+    for (const mod of pyImports(source)) out.push(...pyFiles(mod, dir, root));
     const stem = basename(testPath, '.py').replace(/^test_/, '').replace(/_test$/, '');
     for (const base of [dir, dirname(dir), join(dirname(dir), 'src')]) out.push(join(base, `${stem}.py`));
   } else if (ext === '.go') {
     out.push(testPath.replace(/_test\.go$/, '.go'));
-    let names: string[];
-    try {
-      names = disk.list(dir);
-    } catch {
-      names = [];
-    }
-    for (const name of names.sort()) {
+    for (const name of [...goNames].sort()) {
       if (name.endsWith('.go') && !name.endsWith('_test.go')) out.push(join(dir, name));
     }
   } else if (ext === '.java' || ext === '.kt') {
@@ -341,114 +347,26 @@ export function sentencesOf(text: string): string[] {
 }
 
 // ponytail: only the root .gitignore, and no `!` patterns.
-const SKIP_DIRS = new Set(['node_modules', 'vendor', 'third_party', 'dist', 'build', 'out', 'coverage', 'target', 'generated', '__generated__']);
-const GENERATED_NAME = /(?:\.min\.js|\.d\.[cm]?ts|\.pb\.go|_pb2\.py|\.(?:generated|gen)\.\w+)$/;
-const GENERATED_MARK = /@generated|DO NOT EDIT/;
-const MAX_SOURCE_FILES = 2000;
-const MAX_LISTED_ENTRIES = 20_000;
-const MAX_SOURCE_FILE_CHARS = 200_000;
-const MAX_RELATED_TESTS = 10;
-const DOC_FILE = /\.mdx?$/i;
-const NOT_DOCS = new Set(['agents.md', 'claude.md', 'context.md', 'changelog.md', 'history.md']);
-const MAX_DOC_SECTIONS = 5;
-const MAX_DOC_SECTION_CHARS = 1500;
+export const SKIP_DIRS = new Set(['node_modules', 'vendor', 'third_party', 'dist', 'build', 'out', 'coverage', 'target', 'generated', '__generated__']);
+export const GENERATED_NAME = /(?:\.min\.js|\.d\.[cm]?ts|\.pb\.go|_pb2\.py|\.(?:generated|gen)\.\w+)$/;
+export const GENERATED_MARK = /@generated|DO NOT EDIT/;
+export const MAX_SOURCE_FILES = 2000;
+export const MAX_LISTED_ENTRIES = 20_000;
+export const MAX_SOURCE_FILE_CHARS = 200_000;
+export const MAX_RELATED_TESTS = 10;
+export const DOC_FILE = /\.mdx?$/i;
+export const NOT_DOCS = new Set(['agents.md', 'claude.md', 'context.md', 'changelog.md', 'history.md']);
+export const MAX_DOC_SECTIONS = 5;
+export const MAX_DOC_SECTION_CHARS = 1500;
 
 export function isGenerated(path: string, text: string): boolean {
   return GENERATED_NAME.test(path) || GENERATED_MARK.test(text.slice(0, 500));
 }
 
-export interface SourceFile {
-  path: string;
-  text: string;
-}
-
-export function sourceFiles(disk: Disk, skip: Set<string>): SourceFile[] {
-  return projectFiles(disk, path => isCodeFile(path) && !isTestPath(path) && !skip.has(join(disk.root, path)));
-}
-
-// Tests whose code under test, found the way contextFor finds it, includes this file.
-export function relatedTests(disk: Disk, sourcePath: string): SourceFile[] {
-  const target = resolve(disk.root, sourcePath);
-  const found: SourceFile[] = [];
-  for (const file of projectFiles(disk, path => isCodeFile(path) && isTestPath(path))) {
-    if (!candidates(file.path, file.text, disk).includes(target)) continue;
-    found.push(file);
-    if (found.length >= MAX_RELATED_TESTS) break;
-  }
-  return found;
-}
-
-export interface DocSection {
-  path: string;
-  // The first line in the section that names it.
-  line: number;
-  name: string;
-  text: string;
-}
-
-// Retrieval only, at most five. Instruction files and changelogs are skipped: they are the user's rules, or they are right to describe old behavior.
-export function docSections(disk: Disk, names: string[]): DocSection[] {
-  if (names.length === 0) return [];
-  const found: DocSection[] = [];
-  // `$` is a word in a function name, so a plain `\b` would split it.
-  const words = names.map(name => {
-    const escaped = name.replaceAll('$', '\\$');
-    return { name, pattern: new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`) };
-  });
-  const docs = projectFiles(disk, path => DOC_FILE.test(path) && !NOT_DOCS.has(basename(path).toLowerCase()));
-  for (const doc of docs) {
-    const lines = doc.text.split('\n');
-    const starts = [0];
-    for (let i = 1; i < lines.length; i += 1) {
-      if (/^#{1,6}\s/.test(lines[i] ?? '')) starts.push(i);
-    }
-    starts.push(lines.length);
-    for (let n = 0; n < starts.length - 1; n += 1) {
-      const start = starts[n] ?? 0;
-      const section = lines.slice(start, starts[n + 1]);
-      for (const { name, pattern } of words) {
-        const at = section.findIndex(line => pattern.test(line));
-        if (at < 0) continue;
-        found.push({ path: doc.path, line: start + at + 1, name, text: headTail(section.join('\n').trim(), MAX_DOC_SECTION_CHARS).text });
-        if (found.length >= MAX_DOC_SECTIONS) return found;
-      }
-    }
-  }
-  return found;
-}
-
-// keep() gets the path relative to the root, so a test folder like __tests__ is seen.
-function projectFiles(disk: Disk, keep: (path: string) => boolean): SourceFile[] {
-  const ignored = gitignored(disk);
-  const found: SourceFile[] = [];
-  const dirs = [''];
-  let listed = 0;
-  while (dirs.length > 0 && found.length < MAX_SOURCE_FILES && listed < MAX_LISTED_ENTRIES) {
-    const dir = dirs.shift() ?? '';
-    for (const name of disk.list(dir === '' ? disk.root : join(disk.root, dir))) {
-      listed += 1;
-      const path = dir === '' ? name : `${dir}/${name}`;
-      if (name.startsWith('.') || SKIP_DIRS.has(name) || ignored.some(pattern => pattern.test(path))) continue;
-      if (isCodeFile(name) || DOC_FILE.test(name)) {
-        if (!keep(path) || GENERATED_NAME.test(name)) continue;
-        const full = join(disk.root, path);
-        const text = disk.read(full);
-        if (text === undefined || text.length > MAX_SOURCE_FILE_CHARS || GENERATED_MARK.test(text.slice(0, 500))) continue;
-        found.push({ path: full, text });
-        if (found.length >= MAX_SOURCE_FILES) break;
-        continue;
-      }
-      // No stat on Disk. A name that is not code or markdown is a folder. list() on a file is empty.
-      dirs.push(path);
-    }
-  }
-  return found;
-}
-
 // A folder pattern also matches what is under it.
-function gitignored(disk: Disk): RegExp[] {
+export function gitignorePatterns(text: string): RegExp[] {
   const patterns: RegExp[] = [];
-  for (const raw of (disk.read(join(disk.root, '.gitignore')) ?? '').split('\n')) {
+  for (const raw of text.split('\n')) {
     const line = raw.trim().replace(/\/+$/, '');
     if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
     // Trailing slashes are already gone, so any slash left roots the pattern.

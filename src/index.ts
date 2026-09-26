@@ -4,6 +4,7 @@ import { globFiles, headTail, instructionFilesFor, listDir, readSource } from '.
 import { checkHiddenErrors } from './hidden.ts';
 import { checkInstructions } from './instructions.ts';
 import { type Block, type Failure, shownPath } from './jev.ts';
+import { productionAsyncDisk, ProjectIndex } from './project.ts';
 import { review } from './review.ts';
 import { checkReuse } from './reuse.ts';
 import { loadSettings } from './settings.ts';
@@ -92,6 +93,8 @@ export default async function jevyVet(input: Input) {
   // messageCount when each session was last checked. One check per user message.
   const checked = new Map<string, number>();
   const disk = { root, read: readSource, list: listDir };
+  // One listing for the reuse, special-case, and stale-comment checks. Built once, then cached.
+  const project = new ProjectIndex(productionAsyncDisk(root));
   // The user of a subagent session is the user of the session that started it.
   const topOf = (session: string) => {
     let top = session;
@@ -207,11 +210,14 @@ export default async function jevyVet(input: Input) {
     },
     'tool.execute.before': async (hook: { tool: string; sessionID?: string; callID?: string }, output: { args: unknown }) => {
       const session = hook.sessionID ?? '';
+      // Start the walk on the first call, whatever the tool. Later calls reuse it.
+      void project.ensure().catch(() => undefined);
       const shared = {
         load,
         fetch: globalThis.fetch,
         disk,
         log,
+        project,
       };
       const top = topOf(session);
       // A block in a subagent is answered by the user in the top session, so blocks are kept there.
@@ -267,6 +273,9 @@ export default async function jevyVet(input: Input) {
       // Paths only. Old file text is not part of a claim step, so do not read the disk.
       const edited = changesFrom(hook.tool, hook.args, () => undefined).map(change => shownPath(root, change.path));
       if (edited.length > 0) record(top, { edited });
+      // The next view re-reads what this call changed. After a bash call the listing may be stale too.
+      if (edited.length > 0) project.markStale(edited);
+      if (commandFrom(hook.tool, hook.args)) project.markListingStale();
       const check = pending.get(hook.callID);
       if (!check) return;
       pending.delete(hook.callID);

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { deps, jsonResponse, memoryDisk, treeDisk } from './fakes.test.ts';
+import { asyncTreeDisk, deps, jsonResponse, memoryDisk, treeDisk } from './fakes.test.ts';
 import { type Block, type History, type ReviewDeps } from './jev.ts';
+import { type AsyncDisk, ProjectIndex } from './project.ts';
 import { review } from './review.ts';
 import { type Settings } from './settings.ts';
 
@@ -985,10 +986,11 @@ describe('changes that special-case a test', () => {
     questions: Record<string, { type: string; instructions: string; criteria: { true: string; false: string } }>;
   }
 
-  function run(tool: string, args: unknown, answers: Record<string, unknown>, options: { files?: Record<string, string>; history?: History; userMessages?: string[]; settings?: Partial<Settings>; fail?: boolean } = {}) {
+  function run(tool: string, args: unknown, answers: Record<string, unknown>, options: { files?: Record<string, string>; history?: History; userMessages?: string[]; settings?: Partial<Settings>; fail?: boolean; project?: ProjectIndex } = {}) {
     const bodies: SpecialBody[] = [];
     const notes: string[] = [];
     const tree = treeDisk(options.files ?? project);
+    const async = asyncTreeDisk(options.files ?? project);
     const used = deps((_url, init) => {
       bodies.push(JSON.parse(String(init.body)) as SpecialBody);
       if (options.fail) return Promise.reject(new Error('offline'));
@@ -997,7 +999,8 @@ describe('changes that special-case a test', () => {
     used.history = options.history;
     used.userMessages = options.userMessages;
     used.warn = note => notes.push(note);
-    return { result: review(tool, args, used), bodies, notes, used, reads: tree.reads };
+    used.project = options.project ?? new ProjectIndex(async.disk);
+    return { result: review(tool, args, used), bodies, notes, used, reads: async.readCalls };
   }
 
   test('asks about a source edit whose new value is in a related test, with the matching lines and the test case', async () => {
@@ -1124,5 +1127,18 @@ describe('changes that special-case a test', () => {
     const failed = run('edit', special, {}, { fail: true });
     expect(await failed.result).toBeUndefined();
     expect(failed.used.logs).toEqual(['TypeSafe request failed. The change was allowed.']);
+  });
+
+  test('skips the check when the index is not ready in time, and logs once', async () => {
+    const hanging: AsyncDisk = {
+      root: '/repo',
+      read: () => Promise.resolve(undefined),
+      list: () => new Promise<never>(() => undefined),
+      stat: () => Promise.resolve(undefined),
+    };
+    const asked = run('edit', special, { h0_special_cases: sure }, { project: new ProjectIndex(hanging) });
+    expect(await asked.result).toBeUndefined();
+    expect(asked.bodies).toHaveLength(0);
+    expect(asked.used.logs).toEqual(['project index not ready; no special-case check for this change']);
   });
 });

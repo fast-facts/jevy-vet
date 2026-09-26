@@ -28,7 +28,8 @@ Test checks, the check-weakening check, and the special-case check block. The in
 - Count blocks per top-level session and target. A pass or an allow starts over. At three in a row, tell the agent to stop retrying and ask the user. Keep at most 100 blocks per session and 100 sessions, in memory only.
 - The setup and the code under test are context, not judged. Each question asks one thing, and yes means a problem. Skip a question that needs the code under test when none was found.
 - Scope is not a finding. Do not block, note, or allow on a text match. Jev decides. Do not add pattern checks such as TODO text, `.only`, or `console.log`.
-- The last failed `bash` command is context only. Retrieval only picks what Jev sees. It never notes, blocks, or allows.
+ - The last failed `bash` command is context only. It never notes, blocks, or allows.
+ - The reuse, special-case, and stale-comment checks share one cached project index. It never notes, blocks, or allows.
 - The claim check uses `session.status` idle, from the `event` hook. Ignore `session.idle`. It cannot block. Check once per user message, never a subagent session, and drop a finding when a newer user message came in.
 - The stale-comment check skips `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, changelogs, and docs the same call changes.
 - Checks run in this order: tests, instructions, gate checks, reuse, special cases, claims, hidden errors, then stale comments. A note-only check is its own file, started from `src/index.ts`. A check that blocks stays in `src/review.ts`.

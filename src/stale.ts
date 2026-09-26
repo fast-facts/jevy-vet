@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
-import { docSections, headTail, isGenerated } from './context.ts';
+import { headTail, isGenerated } from './context.ts';
 import { afterChange, askedFor, callTypeSafe, cut, type Finding, ignoredPath, listed, logOnce, noulIsSure, type Question, reader, type ReviewDeps, shownPath, sides, userAsked } from './jev.ts';
+import { indexFromDisk } from './project.ts';
 import { type Change, changesFrom, type Definition, definitionsIn, isCommentLine, isDefinitionFile, isTestSupport } from './subjects.ts';
 
 // The stale-comment check. It notes and never blocks: a wrong comment misleads the next reader, but the code runs as written.
@@ -131,8 +132,10 @@ export async function checkStaleDocs(tool: string, args: unknown, deps: ReviewDe
 
   // Let the tool start. The changed files were read above.
   await new Promise(resolve => setTimeout(resolve, 0));
-  const names = [...new Set(found.flatMap(item => item.names))];
-  for (const section of docSections(disk, names)) {
+  const project = deps.project ?? indexFromDisk(disk);
+  const sections = await project.docSections([...new Set(found.flatMap(item => item.names))]).catch(() => undefined);
+  if (!sections) return;
+  for (const section of sections) {
     if (changedDocs.has(section.path)) continue;
     const n = found.findIndex(item => item.names.includes(section.name));
     comments.push({

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { deps, jsonResponse, treeDisk } from './fakes.test.ts';
+import { asyncTreeDisk, deps, jsonResponse, treeDisk } from './fakes.test.ts';
+import { ProjectIndex } from './project.ts';
 import { type Settings } from './settings.ts';
 import { checkStaleDocs } from './stale.ts';
 
@@ -27,6 +28,7 @@ describe('stale-comment check', () => {
       if (options.fail) return Promise.reject(new Error('offline'));
       return Promise.resolve(jsonResponse({ answers }));
     }, options.settings ?? { key: 'ts_secret' }, disk);
+    used.project = new ProjectIndex(asyncTreeDisk(options.files ?? project).disk);
     return { result: checkStaleDocs(tool, args, { ...used, userMessages: options.userMessages }), bodies, used };
   }
 

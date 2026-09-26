@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { deps, jsonResponse, treeDisk } from './fakes.test.ts';
+import { asyncTreeDisk, deps, jsonResponse, treeDisk } from './fakes.test.ts';
+import { ProjectIndex } from './project.ts';
 import { checkReuse } from './reuse.ts';
 import { type Settings } from './settings.ts';
 
@@ -35,13 +36,15 @@ describe('reuse check', () => {
   function run(tool: string, args: unknown, answers: Record<string, unknown>, options: { files?: Record<string, string>; userMessages?: string[]; settings?: Partial<Settings>; fail?: boolean } = {}) {
     const bodies: ReuseBody[] = [];
     const tree = treeDisk(options.files ?? project);
+    const async = asyncTreeDisk(options.files ?? project);
     const used = deps((_url, init) => {
       bodies.push(JSON.parse(String(init.body)) as ReuseBody);
       if (options.fail) return Promise.reject(new Error('offline'));
       return Promise.resolve(jsonResponse({ answers }));
     }, options.settings ?? { key: 'ts_secret' }, tree.disk);
     used.userMessages = options.userMessages;
-    return { result: checkReuse(tool, args, used), bodies, used, reads: tree.reads };
+    used.project = new ProjectIndex(async.disk);
+    return { result: checkReuse(tool, args, used), bodies, used, reads: async.readCalls };
   }
 
   const write = { filePath: 'src/format.ts', content: FORMAT_DAY };
