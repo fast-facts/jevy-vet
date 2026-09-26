@@ -77,7 +77,10 @@ describe('review', () => {
     const parsed = JSON.parse(body) as SentBody;
     expect(parsed.model).toBe('jev-latest');
     expect(parsed.questions.t0_title_mismatch.type).toBe('noul');
-    expect(parsed.questions.t0_title_mismatch.criteria).toEqual({ true: 'yes', false: 'no' });
+    expect(parsed.questions.t0_title_mismatch.criteria).toEqual({
+      true: 'The title names a behavior, number, order, or absence that no assertion checks.',
+      false: 'An assertion checks each concrete claim in the title. A count in the title checked by `toBe(that count)` is enough. "Oldest dropped" checked by the old path being absent, and "newest kept" checked by the new path being present, is enough. Do not say yes just because one assertion is `toBe(\'ok\')` while another checks the title.',
+    });
     expect(parsed.questions.t0_title_mismatch.instructions).toContain('`files[0].cases[0].test`');
     expect(parsed.questions.t0_passes_on_empty.criteria.true).toContain('No assertion would notice');
     expect(parsed.questions.t0_passes_on_empty.criteria.true).toContain('with no expected count');

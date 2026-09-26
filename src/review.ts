@@ -45,6 +45,10 @@ const CLAIMS: readonly Claim[] = [
     shows: ASSERTION,
     needsCode: false,
     ask: ref => `Does the title of the test in ${ref.test} promise a behavior that none of its assertions check? Helpers it calls may be in ${ref.setup}.`,
+    criteria: {
+      true: 'The title names a behavior, number, order, or absence that no assertion checks.',
+      false: 'An assertion checks each concrete claim in the title. A count in the title checked by `toBe(that count)` is enough. "Oldest dropped" checked by the old path being absent, and "newest kept" checked by the new path being present, is enough. Do not say yes just because one assertion is `toBe(\'ok\')` while another checks the title.',
+    },
   },
   {
     id: 'passes_on_empty',
