@@ -3,7 +3,7 @@ import { checkClaims, type Step } from './claims.ts';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
 import { checkHiddenErrors } from './hidden.ts';
 import { checkInstructions, CLASSIFY_ON_MESSAGE, type Sentence, type SentenceDeps, startSentenceClassification, userSentences } from './instructions.ts';
-import { type Block, type Failure, shownPath } from './jev.ts';
+import { type Block, type Failure, isRecord, shownPath } from './jev.ts';
 import { checkNotes, notesMerged } from './notes.ts';
 import { productionAsyncDisk, ProjectIndex } from './project.ts';
 import { review } from './review.ts';
@@ -213,6 +213,48 @@ export default async function jevyVet(input: Input) {
     const warming: SentenceDeps = { load, fetch: globalThis.fetch, disk, log: undefined, project, userMessages, cache: sentences, sentenceInflight };
     void startSentenceClassification(fresh, warming, settings).catch(() => undefined);
   };
+  // A finished question answer counts as the user speaking, on the top session.
+  // One entry so the 3-line cap keeps each question with its answer. Not a new
+  // turn: steps, checked, and late notes stay. Jev still decides at 0.5.
+  const storeLine = (top: string, line: string) => {
+    const kept = [...messages.get(top) ?? [], headTail(line, MAX_MESSAGE_CHARS).text].slice(-KEEP_MESSAGES);
+    // Delete first so this session moves to the end.
+    messages.delete(top);
+    messages.set(top, kept);
+    counts.set(top, (counts.get(top) ?? 0) + 1);
+    if (messages.size > KEEP_SESSIONS) {
+      const oldest = messages.keys().next().value;
+      if (oldest !== undefined) {
+        messages.delete(oldest);
+        counts.delete(oldest);
+      }
+    }
+    return kept;
+  };
+  const saveQuestion = (top: string, args: unknown, metadata: unknown) => {
+    if (!isRecord(metadata)) return;
+    if (metadata.error || metadata.dismissed || metadata.cancelled || metadata.aborted) return;
+    const rawQuestions = isRecord(args) && Array.isArray(args.questions) ? args.questions : undefined;
+    const rawAnswers = metadata.answers;
+    if (!Array.isArray(rawQuestions) || !Array.isArray(rawAnswers)) return;
+    const pairs: string[] = [];
+    for (let n = 0; n < rawQuestions.length; n += 1) {
+      const item = rawQuestions[n];
+      const field = isRecord(item) ? (item.question ?? item.text) : undefined;
+      const text = typeof item === 'string' ? item : typeof field === 'string' ? field : undefined;
+      if (text === undefined || text.trim() === '') continue;
+      const raw = rawAnswers[n];
+      const labels = Array.isArray(raw)
+        ? raw.filter((label: unknown): label is string => typeof label === 'string' && label.trim() !== '')
+        : typeof raw === 'string' && raw.trim() !== ''
+          ? [raw]
+          : [];
+      if (labels.length === 0) continue;
+      pairs.push(`Question: ${text.trim()}\nAnswer: ${labels.join(', ')}`);
+    }
+    if (pairs.length === 0) return;
+    storeLine(top, pairs.join('\n'));
+  };
   const checkTurn = async (session: string) => {
     // A subagent reports to its parent agent, not to the user.
     if (parents.has(session)) return;
@@ -275,23 +317,12 @@ export default async function jevyVet(input: Input) {
         .join('\n')
         .trim();
       if (text === '') return Promise.resolve();
-      const kept = [...messages.get(hook.sessionID) ?? [], headTail(text, MAX_MESSAGE_CHARS).text].slice(-KEEP_MESSAGES);
-      // Delete first so this session moves to the end.
-      messages.delete(hook.sessionID);
-      messages.set(hook.sessionID, kept);
-      counts.set(hook.sessionID, (counts.get(hook.sessionID) ?? 0) + 1);
+      const kept = storeLine(hook.sessionID, text);
       // A new turn. Recent steps move to past, so a summary of earlier work still counts as backed.
       if (!parents.has(hook.sessionID)) {
         const cur = steps.get(hook.sessionID);
         if (cur?.length) append(past, hook.sessionID, cur);
         steps.delete(hook.sessionID);
-      }
-      if (messages.size > KEEP_SESSIONS) {
-        const oldest = messages.keys().next().value;
-        if (oldest !== undefined) {
-          messages.delete(oldest);
-          counts.delete(oldest);
-        }
       }
       // A new turn. Late notes are stale. Only a top-level message drops them.
       if (!parents.has(hook.sessionID)) dropLate(hook.sessionID, 'new user message');
@@ -376,6 +407,7 @@ export default async function jevyVet(input: Input) {
     // OpenCode returns this same output object to the model, so an appended note reaches the agent.
     'tool.execute.after': async (hook: { tool: string; sessionID: string; callID: string; args: unknown }, output: { title: string; output: string; metadata: unknown }) => {
       const top = topOf(hook.sessionID);
+      if (hook.tool === 'question') saveQuestion(top, hook.args, output.metadata);
       const run = commandFrom(hook.tool, hook.args);
       // OpenCode's bash tool returns a failed command as output, with the exit code in metadata.
       const exit = typeof output.metadata === 'object' && output.metadata !== null && 'exit' in output.metadata ? output.metadata.exit : undefined;

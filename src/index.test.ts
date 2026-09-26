@@ -454,6 +454,83 @@ describe('plugin', () => {
       });
       expect(bodies.join('\n')).not.toContain('The user allowed it, go ahead.');
     });
+
+    test('keeps a blocked test blocked when the only question answer came before the block', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await hooks['tool.execute.after'](
+          { tool: 'question', sessionID: 's', callID: 'q', args: { questions: [{ question: 'Allow weak tests?' }] } },
+          { title: '', output: 'Answered', metadata: { answers: [['Yes, allow it']] } },
+        );
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        expect(bodies.some(body => body.includes('"blocks"'))).toBe(false);
+      });
+    });
+
+    test('allows a blocked test after a question answer, keeping several questions in one line', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        await hooks['tool.execute.after'](
+          { tool: 'question', sessionID: 's', callID: 'q', args: { questions: [{ question: 'Keep this weak test?' }, { question: 'Anything else?' }] } },
+          { title: '', output: 'Answered', metadata: { answers: [['Yes, keep it'], ['No']] } },
+        );
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).resolves.toBeUndefined();
+      });
+      const override = JSON.parse(bodies.find(body => body.includes('"blocks"')) ?? '{}') as { state: { blocks: { user_messages: string[] }[] } };
+      expect(override.state.blocks[0]?.user_messages).toHaveLength(1);
+      expect(override.state.blocks[0]?.user_messages[0]).toContain('Keep this weak test?');
+      expect(override.state.blocks[0]?.user_messages[0]).toContain('Yes, keep it');
+      expect(override.state.blocks[0]?.user_messages[0]).toContain('Anything else?');
+    });
+
+    test('stays blocked after a question answer when Jev is unsure', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9, 0.1), async hooks => {
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        await hooks['tool.execute.after'](
+          { tool: 'question', sessionID: 's', callID: 'q', args: { questions: [{ question: 'Keep this weak test?' }] } },
+          { title: '', output: 'Answered', metadata: { answers: [['Yes, keep it']] } },
+        );
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+      });
+      expect(bodies.some(body => body.includes('"blocks"'))).toBe(true);
+    });
+
+    test('lets a child-session answer allow a child-blocked write, but not a child chat message', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+        const inChild = () => hooks['tool.execute.before']({ tool: 'write', sessionID: 'child', callID: 'k' }, { args: { filePath: 'src/a.test.ts', content: WEAK } });
+        await expect(inChild()).rejects.toThrow('Jevy blocked');
+        await hooks['chat.message']({ sessionID: 'child' }, message('Allow that test.'));
+        await expect(inChild()).rejects.toThrow('Jevy blocked');
+        await hooks['tool.execute.after'](
+          { tool: 'question', sessionID: 'child', callID: 'q', args: { questions: [{ question: 'Keep this weak test?' }] } },
+          { title: '', output: 'Answered', metadata: { answers: [['Yes, keep it']] } },
+        );
+        await expect(inChild()).resolves.toBeUndefined();
+      });
+      expect(bodies.join('\n')).not.toContain('Allow that test.');
+      const override = JSON.parse(bodies.find(body => body.includes('"blocks"')) ?? '{}') as { state: { blocks: { user_messages: string[] }[] } };
+      expect(override.state.blocks[0]?.user_messages[0]).toContain('Keep this weak test?');
+    });
+
+    test('saves nothing when the question is dismissed or empty', async () => {
+      const bodies: string[] = [];
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', judge(bodies, 0.9), async hooks => {
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        const dismissed = { title: '', output: '', metadata: { answers: [['Yes, keep it']], dismissed: true } };
+        await hooks['tool.execute.after']({ tool: 'question', sessionID: 's', callID: 'q1', args: { questions: [{ question: 'Keep it?' }] } }, dismissed);
+        const empty = { title: '', output: '', metadata: { answers: [[]] } };
+        await hooks['tool.execute.after']({ tool: 'question', sessionID: 's', callID: 'q2', args: { questions: [{ question: 'Keep it?' }] } }, empty);
+        const none = { title: '', output: '', metadata: { answers: [] } };
+        await hooks['tool.execute.after']({ tool: 'question', sessionID: 's', callID: 'q3', args: { questions: [] } }, none);
+        await expect(before(hooks, 'write', { filePath: 'src/a.test.ts', content: WEAK })).rejects.toThrow('Jevy blocked');
+        expect(bodies.some(body => body.includes('"blocks"'))).toBe(false);
+      });
+    });
   });
   describe('changes that weaken a check', () => {
     const skipLint = { filePath: '.github/workflows/ci.yml', oldString: '- run: bun run lint', newString: '- run: bun run lint || true' };
