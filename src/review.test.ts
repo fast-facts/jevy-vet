@@ -379,9 +379,10 @@ describe('review', () => {
   describe('test edits', () => {
     const onDisk = 'import { add } from \'./add\';\ntest(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})';
     const weaken = { filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: '// the sum is flaky\nexpect(add(1, 2)).toBeDefined()' };
+    const moved = 'test(\'adds\', () => {\n  expect(add(1, 2)).toBe(3)\n})';
 
     interface EditBody {
-      state: { purpose: string; user_messages?: string[]; edits: { path: string; title?: string; old: string; new: string; added?: string }[] };
+      state: { purpose: string; user_messages?: string[]; edits: { path: string; title?: string; old: string; new: string; added?: string; moved?: string }[] };
       questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }>;
     }
 
@@ -437,6 +438,36 @@ describe('review', () => {
       const removed = await editRun({ filePath: '/repo/a.test.ts', oldString: 'expect(add(1, 2)).toBe(3)', newString: '' }, { e0_removes_test: { type: 'noul', noul: 0.9 } }).result;
       expect(removed).toContain('Test removed: A test or assertion is gone and nothing checks the same behavior.');
       expect(removed).toContain('  now: (removed)');
+    });
+
+    test('sends tests added in other files so a move across files is judged as a replacement', async () => {
+      const patch = [
+        '*** Begin Patch',
+        '*** Update File: src/old.test.ts',
+        '@@',
+        ...moved.split('\n').map(line => `-${line}`),
+        '*** Add File: src/new.test.ts',
+        ...moved.split('\n').map(line => `+${line}`),
+        '*** End Patch',
+      ].join('\n');
+      const run = editRun({ patchText: patch }, { e0_removes_test: { type: 'noul', noul: 0.1 } }, undefined, 'apply_patch');
+      expect(await run.result).toBeUndefined();
+      const body = run.edit();
+      expect(body.state.edits).toEqual([{ path: 'src/old.test.ts', title: 'adds', old: moved, new: '', moved }]);
+      expect(body.questions.e0_removes_test.instructions).toContain('without an equivalent test in `edits[0].new` or `edits[0].moved`');
+    });
+
+    test('still blocks a removal with nothing added elsewhere, and sends no moved tests', async () => {
+      const patch = [
+        '*** Begin Patch',
+        '*** Update File: src/old.test.ts',
+        '@@',
+        ...moved.split('\n').map(line => `-${line}`),
+        '*** End Patch',
+      ].join('\n');
+      const run = editRun({ patchText: patch }, { e0_removes_test: { type: 'noul', noul: 0.9 } }, undefined, 'apply_patch');
+      expect(await run.result).toContain('Test removed: A test or assertion is gone and nothing checks the same behavior.');
+      expect(run.edit().state.edits).toEqual([{ path: 'src/old.test.ts', title: 'adds', old: moved, new: '' }]);
     });
 
     test('allows stronger, equivalent, and unrelated changes, and unsure answers', async () => {
