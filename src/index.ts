@@ -343,9 +343,10 @@ export default async function jevyVet(input: Input) {
       };
       const top = topOf(session);
       // Classify the turn's user sentences while the tool runs. Once per turn, any tool.
+      // One copy shared by the review and note checks below, so the same user text is read once.
+      const topMessages = messages.get(top) ?? [];
       if (!CLASSIFY_ON_MESSAGE && (warmed.get(top) ?? -1) !== (counts.get(top) ?? 0)) {
         remember(warmed, top, counts.get(top) ?? 0);
-        const topMessages = messages.get(top) ?? [];
         if (topMessages.length > 0) startWarming(userSentences(topMessages), topMessages);
       }
       // A block in a subagent is answered by the user in the top session, so blocks are kept there.
@@ -362,7 +363,7 @@ export default async function jevyVet(input: Input) {
       const reason = await review(hook.tool, output.args, {
         ...shared,
         userMessages: parents.has(session) ? [] : messages.get(session) ?? [],
-        history: { blocks: sessionBlocks, messages: messages.get(top) ?? [], messageCount: counts.get(top) ?? 0, lastFailure: failures.get(top) },
+        history: { blocks: sessionBlocks, messages: topMessages, messageCount: counts.get(top) ?? 0, lastFailure: failures.get(top) },
         warn: note => notes.push(note),
       });
       if (reason) throw new Error(reason);
@@ -372,7 +373,7 @@ export default async function jevyVet(input: Input) {
       if (notesMerged()) {
         pending.set(hook.callID, checkNotes(hook.tool, output.args, {
           ...shared,
-          userMessages: messages.get(top) ?? [],
+          userMessages: topMessages,
           cache: sentences,
           sentenceInflight,
           instructionFiles,
@@ -385,14 +386,14 @@ export default async function jevyVet(input: Input) {
       } else {
         const instruction = checkInstructions(hook.tool, output.args, {
           ...shared,
-          userMessages: messages.get(top) ?? [],
+          userMessages: topMessages,
           cache: sentences,
           sentenceInflight,
           instructionFiles,
         }).catch(() => undefined);
-        const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
-        const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [], lastFailure: failures.get(top) }).catch(() => undefined);
-        const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
+        const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: topMessages }).catch(() => undefined);
+        const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: topMessages, lastFailure: failures.get(top) }).catch(() => undefined);
+        const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: topMessages }).catch(() => undefined);
         pending.set(hook.callID, Promise.all([instruction, reuse, hidden, stale]).then(found => {
           const parts = [...notes];
           for (const note of found) if (note) parts.push(note);
