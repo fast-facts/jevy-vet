@@ -22,11 +22,18 @@ export function testFilesFrom(tool: string, args: unknown): TestFile[] {
     // A helper-only edit has no new test. The edit check finds the real test on disk.
     if (tool === 'edit' && !subject.text.match(CASE_MARK)) continue;
     const parts = splitCases(subject.text);
-    if (parts.cases.length === 0) continue;
+    let cases = parts.cases;
+    // An edit hunk carries unchanged neighbor tests as context. Drop new
+    // cases identical to some old case so they are not judged as new tests.
+    if (tool === 'edit' && isRecord(args)) {
+      const oldCases = splitCases(str(args, 'oldString') ?? '').cases;
+      cases = cases.filter(item => !oldCases.some(old => sameCode(item, old, subject.path)));
+    }
+    if (cases.length === 0) continue;
     const patchText = tool === 'apply_patch' && isRecord(args) ? str(args, 'patchText') ?? '' : '';
     const added = patchText.split(/\r?\n/).some(line => line.startsWith(ADD_FILE) && line.slice(ADD_FILE.length).trim() === subject.path);
     const wholeFile = tool === 'write' || added;
-    files.push({ path: subject.path, cases: parts.cases, setup: parts.setup, source: subject.text, edited: !wholeFile });
+    files.push({ path: subject.path, cases, setup: parts.setup, source: subject.text, edited: !wholeFile });
   }
   return files;
 }

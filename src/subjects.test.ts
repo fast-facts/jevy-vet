@@ -42,6 +42,14 @@ describe('testFilesFrom', () => {
     const content = 'import pytest\n\nasync def test_a():\n    assert 1\n\ndef test_b():\n    assert 2';
     expect(testFilesFrom('write', { filePath: 'test_x.py', content })[0]?.cases).toEqual(['async def test_a():\n    assert 1', 'def test_b():\n    assert 2']);
   });
+
+  test('drops unchanged neighbor tests an edit carries as context', () => {
+    const neighbor = 'test(\'neighbor\', () => { expect(url).toBe(\'https://x\') })';
+    const fragment = 'test(\'neighbor\', () => { expect(url).toBe(';
+    const oldString = ['test(\'mine\', () => { expect(a).toBe(1) })', neighbor, fragment].join('\n');
+    const newString = ['test(\'mine\', () => { expect(a).toBe(2) })', neighbor, fragment].join('\n');
+    expect(testFilesFrom('edit', { filePath: 'a.test.ts', oldString, newString })[0]?.cases).toEqual(['test(\'mine\', () => { expect(a).toBe(2) })']);
+  });
 });
 
 describe('titleOf', () => {
