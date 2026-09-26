@@ -44,7 +44,7 @@ interface Stale {
   names: string[];
 }
 
-interface StaleRequest {
+export interface StaleRequest {
   state: {
     purpose: string;
     user_messages?: string[];
@@ -54,8 +54,15 @@ interface StaleRequest {
   questions: Record<string, Question>;
 }
 
-// Reads the changed files before its first await, so they are read as they were before the tool ran. Comments stay: they are what is judged.
-export async function checkStaleDocs(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
+export interface StalePrep {
+  state: StaleRequest['state'];
+  questions: Record<string, Question>;
+  finish: (answers: Record<string, unknown> | undefined) => string | undefined;
+}
+
+// The changed files are read before the first await, so the caller must invoke
+// this without awaiting anything else first. It does no network itself.
+export async function prepareStaleDocs(tool: string, args: unknown, deps: ReviewDeps): Promise<StalePrep | undefined> {
   const disk = deps.disk;
   if (!disk) return;
   const read = reader(disk);
@@ -183,9 +190,25 @@ export async function checkStaleDocs(tool: string, args: unknown, deps: ReviewDe
     },
     questions,
   };
-  const answers = await callTypeSafe(once, settings, request, 'No stale-comment note was added.');
-  if (!answers) return;
+  return {
+    state: request.state,
+    questions: request.questions,
+    finish: answers => finishStaleDocs(found, asked, once, answers),
+  };
+}
 
+// Thin wrapper: prepare, one request, finish. Kept so the single-check path stays the same.
+export async function checkStaleDocs(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
+  const prep = await prepareStaleDocs(tool, args, deps);
+  if (!prep) return;
+  const settings = deps.load();
+  if (settings.error || settings.key.trim() === '') return;
+  const answers = await callTypeSafe(logOnce(deps), settings, { state: prep.state, questions: prep.questions }, 'No stale-comment note was added.');
+  return prep.finish(answers);
+}
+
+function finishStaleDocs(found: Stale[], asked: Comment[], once: ReviewDeps, answers: Record<string, unknown> | undefined): string | undefined {
+  if (!answers) return;
   const findings: Finding[] = [];
   for (const [k, comment] of asked.entries()) {
     if (!noulIsSure(answers[`c${k}_stale`])) continue;

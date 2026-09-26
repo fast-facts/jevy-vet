@@ -4,6 +4,7 @@ import { globFiles, headTail, instructionFilesFor, listDir, readSource } from '.
 import { checkHiddenErrors } from './hidden.ts';
 import { checkInstructions } from './instructions.ts';
 import { type Block, type Failure, shownPath } from './jev.ts';
+import { checkNotes, notesMerged } from './notes.ts';
 import { productionAsyncDisk, ProjectIndex } from './project.ts';
 import { review } from './review.ts';
 import { checkReuse } from './reuse.ts';
@@ -240,20 +241,37 @@ export default async function jevyVet(input: Input) {
       if (reason) throw new Error(reason);
       if (!hook.callID) return;
       // Started now so they run while the tool does. The after hook adds the notes.
-      const instruction = checkInstructions(hook.tool, output.args, {
-        ...shared,
-        userMessages: messages.get(top) ?? [],
-        cache: sentences,
-        instructionFiles: paths => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk),
-      }).catch(() => undefined);
-      const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
-      const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [], lastFailure: failures.get(top) }).catch(() => undefined);
-      const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
-      pending.set(hook.callID, Promise.all([instruction, reuse, hidden, stale]).then(found => {
-        const parts = [...notes];
-        for (const note of found) if (note) parts.push(note);
-        return parts.join('\n\n') || undefined;
-      }));
+      const instructionFiles = (paths: string[]) => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk);
+      // The merged path sends one TypeSafe request for all four note checks.
+      // Off by default until a live A/B shows it keeps precision.
+      if (notesMerged()) {
+        pending.set(hook.callID, checkNotes(hook.tool, output.args, {
+          ...shared,
+          userMessages: messages.get(top) ?? [],
+          cache: sentences,
+          instructionFiles,
+          lastFailure: failures.get(top),
+        }).then(note => {
+          const parts = [...notes];
+          if (note) parts.push(note);
+          return parts.join('\n\n') || undefined;
+        }).catch(() => notes.join('\n\n') || undefined));
+      } else {
+        const instruction = checkInstructions(hook.tool, output.args, {
+          ...shared,
+          userMessages: messages.get(top) ?? [],
+          cache: sentences,
+          instructionFiles,
+        }).catch(() => undefined);
+        const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
+        const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [], lastFailure: failures.get(top) }).catch(() => undefined);
+        const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
+        pending.set(hook.callID, Promise.all([instruction, reuse, hidden, stale]).then(found => {
+          const parts = [...notes];
+          for (const note of found) if (note) parts.push(note);
+          return parts.join('\n\n') || undefined;
+        }));
+      }
       if (pending.size > KEEP_PENDING) {
         const oldest = pending.keys().next().value;
         if (oldest !== undefined) pending.delete(oldest);

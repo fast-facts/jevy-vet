@@ -18,6 +18,7 @@ Test checks, the check-weakening check, and the special-case check block. The in
 - Never check changes inside `node_modules` or to `jevy-vet.jsonc`. A plugin note never becomes an instruction.
 - Block only when a hard rule scores 0.8 or higher and confidence is also 0.8 or higher. From 0.5 up to that, or when confidence is lower, write the file and add a note. Below 0.5 says nothing. A block in the same write wins, and its notes are dropped.
 - A note-only check never blocks. It notes only at 0.8, in `tool.execute.after`. Below that it says nothing. With no key, an unreadable config, or a TypeSafe failure, it adds nothing.
+- The four note checks share one TypeSafe request per tool call, with prefixed ids and one shared `user_messages`. The sentence request stays separate and runs first. Over the size or question limit, or when instructions split, it falls back to one request per check. It stays off until a live A/B shows it keeps precision.
 - Judge the new text, not the old file. For `edit`, that is `newString`. For a patch update, that is the added lines. Old text is contrast only. Never send it with the new-test questions.
 - Strip code comments before the edit check, the special-case check, and the instruction check. For the instruction check, strip only when the comment syntax is known. Keep comments for the hidden-error check and the stale-comment check.
 - Only real user text from `chat.message` counts. Synthetic parts, ignored parts, and subagent prompts do not. A subagent's edit uses the parent session's user messages.
@@ -32,7 +33,7 @@ Test checks, the check-weakening check, and the special-case check block. The in
  - The reuse, special-case, and stale-comment checks share one cached project index. It never notes, blocks, or allows.
 - The claim check uses `session.status` idle, from the `event` hook. Ignore `session.idle`. It cannot block. Check once per user message, never a subagent session, and drop a finding when a newer user message came in.
 - The stale-comment check skips `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, changelogs, and docs the same call changes.
-- Checks run in this order: tests, instructions, gate checks, reuse, special cases, claims, hidden errors, then stale comments. A note-only check is its own file, started from `src/index.ts`. A check that blocks stays in `src/review.ts`.
+- Checks run in this order: tests, instructions, gate checks, reuse, special cases, claims, hidden errors, then stale comments. A note-only check is its own file, started from `src/index.ts`. The combined note request is in `src/notes.ts`. A check that blocks stays in `src/review.ts`.
 - Do not add another export to `src/index.ts`. OpenCode treats every export as a plugin.
 - Do not add an MCP client, and do not shell out to `jev-mcp`.
 - Use `jev-latest`. Do not pin a model version.

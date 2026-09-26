@@ -1,6 +1,7 @@
 import { isAbsolute, relative } from 'node:path';
 import { headTail, type InstructionFile, sentencesOf } from './context.ts';
 import { callTypeSafe, ignoredPath, logOnce, MAX_EDIT_SIDE_CHARS, MAX_QUESTIONS, noulIsSure, noulScore, type Question, reader, type ReviewDeps, withoutComments } from './jev.ts';
+import { type Settings } from './settings.ts';
 import { type Change, changesFrom } from './subjects.ts';
 
 // The instruction check. It warns and never blocks: a rule read from prose is a guess, and
@@ -31,7 +32,7 @@ interface SentenceRequest {
   questions: Record<string, Question>;
 }
 
-interface RuleRequest {
+export interface RuleRequest {
   state: {
     purpose: string;
     user_messages?: string[];
@@ -41,8 +42,18 @@ interface RuleRequest {
   questions: Record<string, Question>;
 }
 
+export interface InstructionPrep {
+  requests: RuleRequest[];
+  finish: (results: (Record<string, unknown> | undefined)[]) => string | undefined;
+  // Shared with the wrapper, so sentence and rule failures log one line.
+  once: ReviewDeps;
+  settings: Settings;
+}
+
 // Reads the disk before its first await, so a `write` is compared with the file as it was before the write.
-export async function checkInstructions(tool: string, args: unknown, deps: InstructionDeps): Promise<string | undefined> {
+// The sentence requests stay separate and run first; only the rule questions are returned for merging.
+// With silentSentences the sentence failures stay quiet, so one combined failure logs one line.
+export async function prepareInstructions(tool: string, args: unknown, deps: InstructionDeps, silentSentences = false): Promise<InstructionPrep | undefined> {
   const root = deps.disk?.root ?? '';
   const changes = changesFrom(tool, args, reader(deps.disk)).filter(change => !ignoredPath(change.path)).slice(0, MAX_CHANGES);
   if (changes.length === 0) return;
@@ -73,13 +84,14 @@ export async function checkInstructions(tool: string, args: unknown, deps: Instr
     sentences.push(sentence);
   }
 
-  // Each sentence is asked once per plugin lifetime.
+  // Each sentence is asked once per plugin lifetime. These requests stay separate.
   const unknown = sentences.filter(sentence => !deps.cache.has(sentence.key));
   const chunks: Sentence[][] = [];
   for (let start = 0; start < unknown.length; start += MAX_SENTENCES_PER_REQUEST) chunks.push(unknown.slice(start, start + MAX_SENTENCES_PER_REQUEST));
+  const sentenceDeps = silentSentences ? { ...deps, log: undefined } : once;
   await Promise.all(chunks.map(async chunk => {
     const request = sentenceRequest(chunk, userMessages);
-    const answers = await callTypeSafe(once, settings, request, allowed);
+    const answers = await callTypeSafe(sentenceDeps, settings, request, allowed);
     for (const [n, sentence] of chunk.entries()) {
       const limits = noulScore(answers?.[`s${n}_limits`]);
       const style = noulScore(answers?.[`s${n}_style`]);
@@ -102,7 +114,23 @@ export async function checkInstructions(tool: string, args: unknown, deps: Instr
   for (let start = 0; start < changes.length; start += perRequest) {
     requests.push(ruleRequest(changes.slice(start, start + perRequest), rules, userMessages));
   }
-  const results = await Promise.all(requests.map(request => callTypeSafe(once, settings, request, allowed)));
+  return {
+    requests,
+    finish: results => finishInstructions(requests, rules, show, results),
+    once,
+    settings,
+  };
+}
+
+// Thin wrapper: prepare, one request per chunk, finish. Kept so the single-check path stays the same.
+export async function checkInstructions(tool: string, args: unknown, deps: InstructionDeps): Promise<string | undefined> {
+  const prep = await prepareInstructions(tool, args, deps);
+  if (!prep) return;
+  const results = await Promise.all(prep.requests.map(request => callTypeSafe(prep.once, prep.settings, request, 'No instruction note was added.')));
+  return prep.finish(results);
+}
+
+function finishInstructions(requests: RuleRequest[], rules: Sentence[], show: (path: string) => string, results: (Record<string, unknown> | undefined)[]): string | undefined {
   const warnings: string[] = [];
   for (const [r, request] of requests.entries()) {
     const answers = results[r];

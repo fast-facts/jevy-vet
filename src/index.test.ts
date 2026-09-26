@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import plugin from './index.ts';
+import { setNotesMerged } from './notes.ts';
 
 const USEFUL = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
 
@@ -336,6 +337,30 @@ describe('plugin', () => {
       const check = sent.find(body => body.state.instructions);
       expect(check?.state.user_messages).toEqual(['Do not touch package.json.']);
       expect(JSON.stringify(sent)).not.toContain('just edit package.json');
+    });
+
+    test('sends one note request per edit when merged, besides the sentence request', async () => {
+      setNotesMerged(true);
+      try {
+        const project = withProject({ 'AGENTS.md': '- Do not edit src/api.ts.', 'src/api.ts': 'export const a = 1' });
+        const sent: Sent[] = [];
+        const args = { filePath: join(project, 'src/api.ts'), content: 'export const a = 2' };
+        try {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', strict(sent), async hooks => {
+            await expect(before(hooks, 'write', args)).resolves.toBeUndefined();
+            const mine = { title: '', output: 'Wrote file', metadata: {} };
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, mine);
+            expect(mine.output).toContain('may break an instruction');
+          }, undefined, project);
+        } finally {
+          rmSync(project, { recursive: true, force: true });
+        }
+        expect(sent).toHaveLength(2);
+        expect(sent[0]?.state.sentences).toBeDefined();
+        expect(sent[1]?.state.instructions).toBeDefined();
+      } finally {
+        setNotesMerged(false);
+      }
     });
 
     test('does nothing for a non-test write without a key, and nothing after a blocked write', async () => {

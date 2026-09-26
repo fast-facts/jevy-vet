@@ -36,7 +36,7 @@ interface Found extends Definition {
   words: Words;
 }
 
-interface ReuseRequest {
+export interface ReuseRequest {
   state: {
     purpose: string;
     user_messages?: string[];
@@ -46,8 +46,15 @@ interface ReuseRequest {
   questions: Record<string, Question>;
 }
 
-// Reads the changed files before its first await, so they are compared as they were before the tool ran.
-export async function checkReuse(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
+export interface ReusePrep {
+  state: ReuseRequest['state'];
+  questions: Record<string, Question>;
+  finish: (answers: Record<string, unknown> | undefined) => string | undefined;
+}
+
+// The sync disk reads run before the first await, so the caller must invoke
+// this without awaiting anything else first. It does no network itself.
+export async function prepareReuse(tool: string, args: unknown, deps: ReviewDeps): Promise<ReusePrep | undefined> {
   const disk = deps.disk;
   if (!disk) return;
   const read = reader(disk);
@@ -143,9 +150,25 @@ export async function checkReuse(tool: string, args: unknown, deps: ReviewDeps):
     },
     questions,
   };
-  const answers = await callTypeSafe(once, settings, request, 'No reuse note was added.');
-  if (!answers) return;
+  return {
+    state: request.state,
+    questions: request.questions,
+    finish: answers => finishReuse(asked, existing, show, once, answers),
+  };
+}
 
+// Thin wrapper: prepare, one request, finish. Kept so the single-check path stays the same.
+export async function checkReuse(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
+  const prep = await prepareReuse(tool, args, deps);
+  if (!prep) return;
+  const settings = deps.load();
+  if (settings.error || settings.key.trim() === '') return;
+  const answers = await callTypeSafe(logOnce(deps), settings, { state: prep.state, questions: prep.questions }, 'No reuse note was added.');
+  return prep.finish(answers);
+}
+
+function finishReuse(asked: { item: Found; matches: number[] }[], existing: Found[], show: (path: string) => string, once: ReviewDeps, answers: Record<string, unknown> | undefined): string | undefined {
+  if (!answers) return;
   const findings: Finding[] = [];
   for (const [n, { item, matches }] of asked.entries()) {
     let best: Found | undefined;

@@ -167,7 +167,7 @@ If Jev is sure, a note tells the agent to update the comment or doc, or to ask y
 
 The write goes through unless Jev is sure. Sure means a score of 0.8 or higher, and confidence of 0.8 or higher when confidence is present. It also goes through when TypeSafe is down, times out, or sends a bad response.
 
-For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, hidden-error, and stale-comment checks add a note only when Jev is sure. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
+For the test checks, changes to checks, and faked answers, a score from 0.5 up to sure adds a note instead. The instruction, reuse, hidden-error, and stale-comment checks add a note only when Jev is sure. Those four notes share one request per change. The claim check asks the agent only when Jev is sure. From 0.5 it only shows you a toast.
 
 A test write is blocked when the config file is missing, cannot be read, or has no `TYPESAFE_API_KEY`. Other writes and commands are not.
 

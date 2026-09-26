@@ -31,7 +31,7 @@ const REMOVED_ERROR_LINE = [
   /\breturn\s+(?:nil,\s*)?err\b|\bErr\(/,
 ];
 
-interface HiddenDeps extends ReviewDeps {
+export interface HiddenDeps extends ReviewDeps {
   // A guard added right after a crash is a strong sign.
   lastFailure?: Failure;
 }
@@ -44,7 +44,7 @@ interface Hidden {
   removed: string[];
 }
 
-interface HiddenRequest {
+export interface HiddenRequest {
   state: {
     purpose: string;
     user_messages?: string[];
@@ -54,8 +54,15 @@ interface HiddenRequest {
   questions: Record<string, Question>;
 }
 
-// Reads the changed files before its first await, so they are read as they were before the tool ran. Comments stay: that is where best-effort code says so.
-export async function checkHiddenErrors(tool: string, args: unknown, deps: HiddenDeps): Promise<string | undefined> {
+export interface HiddenPrep {
+  state: HiddenRequest['state'];
+  questions: Record<string, Question>;
+  finish: (answers: Record<string, unknown> | undefined) => string | undefined;
+}
+
+// The changed files are read before the first await, so the caller must invoke
+// this without awaiting anything else first. It does no network itself.
+export async function prepareHiddenErrors(tool: string, args: unknown, deps: HiddenDeps): Promise<HiddenPrep | undefined> {
   const disk = deps.disk;
   if (!disk) return;
   const read = reader(disk);
@@ -110,9 +117,25 @@ export async function checkHiddenErrors(tool: string, args: unknown, deps: Hidde
     },
     questions,
   };
-  const answers = await callTypeSafe(once, settings, request, 'No hidden-error note was added.');
-  if (!answers) return;
+  return {
+    state: request.state,
+    questions: request.questions,
+    finish: answers => finishHiddenErrors(found, once, answers),
+  };
+}
 
+// Thin wrapper: prepare, one request, finish. Kept so the single-check path stays the same.
+export async function checkHiddenErrors(tool: string, args: unknown, deps: HiddenDeps): Promise<string | undefined> {
+  const prep = await prepareHiddenErrors(tool, args, deps);
+  if (!prep) return;
+  const settings = deps.load();
+  if (settings.error || settings.key.trim() === '') return;
+  const answers = await callTypeSafe(logOnce(deps), settings, { state: prep.state, questions: prep.questions }, 'No hidden-error note was added.');
+  return prep.finish(answers);
+}
+
+function finishHiddenErrors(found: Hidden[], once: ReviewDeps, answers: Record<string, unknown> | undefined): string | undefined {
+  if (!answers) return;
   const findings: Finding[] = [];
   for (const [n, item] of found.entries()) {
     if (!noulIsSure(answers[`x${n}_hides_error`])) continue;
