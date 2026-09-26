@@ -283,7 +283,6 @@ function ruleRequest(changes: Change[], rules: Sentence[], userMessages: string[
       instructions: rules.map(rule => ({ from: rule.from, text: rule.text })),
       changes: changes.map(change => ({
         path: change.path,
-        ...(change.old === undefined ? {} : { old: side(change.old, change.path) }),
         new: side(change.new, change.path),
       })),
     },

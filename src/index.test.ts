@@ -319,8 +319,8 @@ describe('plugin', () => {
         'Wrote file\n\nJevy note: this change was made, but it may break an instruction.\n- src/api.ts may break "Do not edit src/api.ts." (from AGENTS.md)\nCheck the change. If it does break the instruction, undo it or ask the user.',
         'Wrote file',
       ]);
-      // The old text was read before the write.
-      expect(sent[1]?.state.changes).toEqual([{ path: join(project, 'src/api.ts'), old: 'export const a = 1', new: 'export const a = 2' }]);
+      // Only the new text is judged.
+      expect(sent[1]?.state.changes).toEqual([{ path: join(project, 'src/api.ts'), new: 'export const a = 2' }]);
     });
 
     test('checks a subagent\'s edit against the parent session\'s user messages, and reads configured instruction files', async () => {

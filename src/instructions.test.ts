@@ -89,7 +89,7 @@ describe('instruction check', () => {
     expect(extract?.questions.s0_style?.instructions).toBe('Is the sentence in `sentences[0].text` only about formatting or code style?');
     // The style rule and the description are not checked against the edit.
     expect(check?.state.instructions).toEqual([{ from: 'AGENTS.md', text: 'Do not change `src/api.ts` signatures.' }]);
-    expect(check?.state.changes).toEqual([{ path: '/repo/src/api.ts', old: 'export function get(id: string) {', new: 'export function get(id: number) {' }]);
+    expect(check?.state.changes).toEqual([{ path: '/repo/src/api.ts', new: 'export function get(id: number) {' }]);
     expect(check?.questions.c0_i0_breaks?.instructions).toBe('Does the change in `changes[0]` violate the instruction in `instructions[0].text`?');
     expect(Object.keys(check?.questions ?? {})).toEqual(['c0_i0_breaks']);
   });
@@ -154,7 +154,7 @@ describe('instruction check', () => {
     const { sent, fetchImpl } = judge(breaks(() => false));
     const d = instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': AGENTS }, disk: { '/repo/src/api.ts': 'export function get(id: string) {}' } });
     await checkInstructions('write', { filePath: 'src/api.ts', content: 'export function get(id: number) {}' }, d);
-    expect(sent[1]?.state.changes).toEqual([{ path: 'src/api.ts', old: 'export function get(id: string) {}', new: 'export function get(id: number) {}' }]);
+    expect(sent[1]?.state.changes).toEqual([{ path: 'src/api.ts', new: 'export function get(id: number) {}' }]);
     expect(d.asked).toEqual([['src/api.ts']]);
   });
 
@@ -232,7 +232,7 @@ describe('instruction check', () => {
       else {
         expect(note).toBeUndefined();
         expect(Object.keys(questions)).toEqual([]);
-        expect(sent[1]?.state.changes).toEqual([{ path: item.file, old: 'a', new: 'b' }]);
+        expect(sent[1]?.state.changes).toEqual([{ path: item.file, new: 'b' }]);
       }
     }
   });

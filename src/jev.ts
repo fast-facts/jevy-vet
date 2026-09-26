@@ -266,10 +266,9 @@ export function ignoredPath(path: string): boolean {
   return /(?:^|[\\/])node_modules[\\/]/.test(path) || /(?:^|[\\/])jevy-vet\.jsonc?$/.test(path);
 }
 
-// A long file sends only the lines that differ and a few around them, so the change is not cut out of the middle.
+// A change sends only the lines that differ and a few around them, so the change is not cut out of the middle.
 export function sides(change: { old?: string; new: string }): { old?: string; new: string } {
   if (change.old === undefined) return { new: headTail(change.new, MAX_EDIT_SIDE_CHARS).text };
-  if (change.old.length <= MAX_EDIT_SIDE_CHARS && change.new.length <= MAX_EDIT_SIDE_CHARS) return { old: change.old, new: change.new };
   const before = change.old.split('\n');
   const after = change.new.split('\n');
   let samePrefix = 0;
