@@ -49,10 +49,18 @@ describe('stale-comment check', () => {
       instructions: 'Is the comment or doc in `comments[0]` wrong about the code after the change in `changes[0]`?',
       criteria: {
         true: 'It states a parameter, return value, error, default, or behavior that the changed code no longer has, or, when `edited` is true, it claims something the code does not do.',
-        false: 'It is still true of the new code, is vague enough to stay true, was updated in the same change to match, or is about code the change did not touch.',
+        false: 'It is still true of the new code, is vague enough to stay true, was updated in the same change to match, is about code the change did not touch, or says what the function does and stays true even when the function also loads settings, checks a flag, or calls another function to do that work; one added line is not the whole behavior.',
       },
     });
     expect(Object.keys(body?.questions ?? {})).toEqual(['c0_stale', 'c1_stale', 'c2_stale']);
+  });
+
+  test('says a what-it-does comment stays true past setup or delegated work', async () => {
+    const asked = run('edit', more, {});
+    expect(await asked.result).toBeUndefined();
+    const criteria = asked.bodies[0]?.questions.c0_stale?.criteria;
+    expect(criteria?.false).toContain('says what the function does and stays true even when the function also loads settings, checks a flag, or calls another function to do that work');
+    expect(criteria?.false).toContain('one added line is not the whole behavior');
   });
 
   test('notes only when sure, with the comment line and the changed line', async () => {

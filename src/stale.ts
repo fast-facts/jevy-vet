@@ -16,7 +16,7 @@ const STALE_RULE = 'Stale comment: A comment or doc says something the changed c
 const UPDATE_DOC = 'Update the comment or doc to match the new code. If the code is what is wrong, fix it or ask the user.';
 const STALE_CRITERIA = {
   true: 'It states a parameter, return value, error, default, or behavior that the changed code no longer has, or, when `edited` is true, it claims something the code does not do.',
-  false: 'It is still true of the new code, is vague enough to stay true, was updated in the same change to match, or is about code the change did not touch.',
+  false: 'It is still true of the new code, is vague enough to stay true, was updated in the same change to match, is about code the change did not touch, or says what the function does and stays true even when the function also loads settings, checks a flag, or calls another function to do that work; one added line is not the whole behavior.',
 };
 
 interface Comment {
