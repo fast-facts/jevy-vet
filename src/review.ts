@@ -97,6 +97,10 @@ const CLAIMS: readonly Claim[] = [
     shows: ASSERTION,
     needsCode: true,
     ask: ref => `Is the code in ${ref.code} that the test in ${ref.test} exercises only a getter, a setter, or a constructor that stores fields?`,
+    criteria: {
+      true: 'The code under test is only a getter, a setter, or a constructor that stores fields, and the test only checks those stored fields.',
+      false: 'The test calls a hook, function, or command and asserts a behavior, such as no fetch, a count, or an output. One assertion that a flag is false does not make it true if another assertion checks that behavior.',
+    },
   },
 ];
 

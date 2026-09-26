@@ -298,6 +298,10 @@ describe('review', () => {
     expect(Object.keys(parsed.questions)).toHaveLength(10);
     expect(parsed.questions.t1_copied_expectation.instructions).toContain('`files[0].code_under_test`');
     expect(parsed.questions.t1_trivial_code.instructions).toContain('`files[0].cases[1].test`');
+    expect(parsed.questions.t1_trivial_code.criteria).toEqual({
+      true: 'The code under test is only a getter, a setter, or a constructor that stores fields, and the test only checks those stored fields.',
+      false: 'The test calls a hook, function, or command and asserts a behavior, such as no fetch, a count, or an output. One assertion that a flag is false does not make it true if another assertion checks that behavior.',
+    });
     expect(result).toBe([
       'Jevy blocked this test write.',
       '- /repo/src/math.test.ts, test "doubles"',
@@ -905,9 +909,9 @@ describe('changes that weaken a check', () => {
       '*** End Patch',
     ].join('\n');
     const used = deps(() => Promise.resolve(jsonResponse({ answers: {
-      e0_change: { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.9 }, confidence: 0.9 },
-      g0_weakens_gate: sure,
-    } })), { key: 'ts_secret' }, disk);
+        e0_change: { type: 'choice', choice: 'weaker', probabilities: { weaker: 0.9 }, confidence: 0.9 },
+        g0_weakens_gate: sure,
+      } })), { key: 'ts_secret' }, disk);
     const result = await review('apply_patch', { patchText }, used);
     expect(result).toStartWith('Jevy blocked this test edit and change to a check.');
     expect(result).toContain('Weaker check');
