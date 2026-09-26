@@ -130,25 +130,18 @@ describe('docSections', () => {
 });
 
 describe('freshness', () => {
-  test('re-reads a file the same call changed after it is marked stale', async () => {
+  test('re-reads a changed file, marked stale or by a new stat', async () => {
     const { index, tree } = withIndex({ '/repo/src/a.ts': 'export const a = 1' });
     expect((await index.sourceFiles(new Set()))[0]?.text).toBe('export const a = 1');
     const reads = tree.readCalls.length;
-    // An untouched file is served from the cache, not re-read.
     expect((await index.sourceFiles(new Set()))[0]?.text).toBe('export const a = 1');
     expect(tree.readCalls.length).toBe(reads);
     tree.write('/repo/src/a.ts', 'export const a = 2');
     index.markStale(['/repo/src/a.ts']);
     expect((await index.sourceFiles(new Set()))[0]?.text).toBe('export const a = 2');
-  });
-
-  test('re-reads when the stat changes even without a mark', async () => {
-    const { index, tree } = withIndex({ '/repo/src/a.ts': 'export const a = 1' });
-    expect((await index.sourceFiles(new Set()))[0]?.text).toBe('export const a = 1');
-    tree.write('/repo/src/a.ts', 'export const a = 2');
-    // A stat change is noticed on its own.
+    tree.write('/repo/src/a.ts', 'export const a = 3');
     index.markStale(['/repo/src/other.ts']);
-    expect((await index.sourceFiles(new Set()))[0]?.text).toBe('export const a = 2');
+    expect((await index.sourceFiles(new Set()))[0]?.text).toBe('export const a = 3');
   });
 
   test('a new file appears after the listing is marked stale', async () => {
@@ -173,7 +166,6 @@ describe('one walk', () => {
     await index.docSections(['a']);
     await index.sourceFiles(new Set());
     const dirs = tree.listCalls.slice().sort();
-    // One call per folder: the root and src. No view lists twice.
     expect(dirs).toEqual(['/repo', '/repo/src']);
   });
 });

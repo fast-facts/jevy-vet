@@ -257,18 +257,12 @@ describe('sentencesOf', () => {
       'It is rebuilt on every run.',
       'Keep the public API stable!',
       'Ask before adding a dependency',
-      // Only a capital starts a new sentence, so "e.g. use" stays whole.
       'Never change the database schema without a migration. e.g. use the tool.',
     ]);
-  });
-
-  test('cuts a very long sentence', () => {
     expect(sentencesOf('a'.repeat(1000))[0]).toHaveLength(400);
   });
 });
 
-// The sourceFiles, relatedTests, and docSections tests moved to project.test.ts
-// with the code they check. The sync walk is gone. The shared async index serves them.
 describe('isGenerated', () => {
   test('matches generated names and a generated mark near the top', () => {
     expect(isGenerated('src/api.pb.go', 'package api')).toBe(true);

@@ -4,15 +4,14 @@ import { askedFor, callTypeSafe, cut, type Finding, ignoredPath, latestUserMessa
 import { indexFromDisk, type SourceFile } from './project.ts';
 import { changesFrom, type Definition, definitionsIn, isDefinitionFile } from './subjects.ts';
 
-// Notes and never blocks. Candidates are the closest word matches, so a better one can be missed.
+// Notes, never blocks. Candidates are the closest word matches, so a better one can be missed.
 const MAX_NEW_DEFINITIONS = 5;
 const MAX_CANDIDATES = 3;
 const MAX_NEW_CODE_CHARS = 3000;
 const MAX_CANDIDATE_CHARS = 2000;
-// Needs at least this many shared words, and this much overlap.
 const MIN_SHARED_WORDS = 3;
 const MIN_OVERLAP = 0.2;
-// This much shared body with a function the same call removes means a move.
+// This much shared body with a removed function means a move.
 const MOVED_OVERLAP = 0.5;
 const REUSE_RULE = 'Duplicate code: It repeats what existing code already does.';
 const REUSE_CRITERIA = {
@@ -52,8 +51,7 @@ export interface ReusePrep {
   finish: (answers: Record<string, unknown> | undefined) => string | undefined;
 }
 
-// The sync disk reads run before the first await, so the caller must invoke
-// this without awaiting anything else first. It does no network itself.
+// Reads disk before the first await. Call without awaiting first. No network.
 export async function prepareReuse(tool: string, args: unknown, deps: ReviewDeps): Promise<ReusePrep | undefined> {
   const disk = deps.disk;
   if (!disk) return;
@@ -88,7 +86,7 @@ export async function prepareReuse(tool: string, args: unknown, deps: ReviewDeps
   const settings = deps.load();
   if (settings.error || settings.key.trim() === '') return;
 
-  // Let the tool start. The changed files were read above and are skipped below.
+  // Let the tool start; changed files were read above and are skipped below.
   await new Promise(resolve => setTimeout(resolve, 0));
   const project = deps.project ?? indexFromDisk(disk);
   const indexed = await project.sourceFiles(changed).catch(() => undefined);
@@ -157,7 +155,6 @@ export async function prepareReuse(tool: string, args: unknown, deps: ReviewDeps
   };
 }
 
-// Thin wrapper: prepare, one request, finish. Kept so the single-check path stays the same.
 export async function checkReuse(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
   const prep = await prepareReuse(tool, args, deps);
   if (!prep) return;

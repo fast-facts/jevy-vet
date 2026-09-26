@@ -9,16 +9,8 @@ const USEFUL = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
 
 function allowBody() {
   const answer = { type: 'noul', noul: 0.1 };
-  return {
-    model: 'jev-latest',
-    answers: {
-      t0_title_mismatch: answer,
-      t0_passes_on_empty: answer,
-      t0_copied_expectation: answer,
-      t0_mocks_code_under_test: answer,
-      t0_trivial_code: answer,
-    },
-  };
+  const keys = ['t0_title_mismatch', 't0_passes_on_empty', 't0_copied_expectation', 't0_mocks_code_under_test', 't0_trivial_code'];
+  return { model: 'jev-latest', answers: Object.fromEntries(keys.map(key => [key, answer])) };
 }
 
 interface SentBody {
@@ -37,26 +29,17 @@ interface SentBody {
 }
 
 describe('review', () => {
-  test('does not call Jev for a non-test write', async () => {
+  test('does not call Jev for a non-test write or another tool', async () => {
     let called = false;
-    const used = deps(() => {
+    const fetchImpl: ReviewDeps['fetch'] = () => {
       called = true;
       return Promise.resolve(jsonResponse(allowBody()));
-    });
-    const result = await review('write', { filePath: 'src/foo.ts', content: USEFUL }, used);
-    expect(result).toBeUndefined();
+    };
+    const used = deps(fetchImpl);
+    expect(await review('write', { filePath: 'src/foo.ts', content: USEFUL }, used)).toBeUndefined();
+    expect(await review('read', { filePath: 'src/foo.test.ts' }, deps(fetchImpl))).toBeUndefined();
     expect(called).toBe(false);
     expect(used.loads).toBe(0);
-  });
-
-  test('does not call Jev for other tools', async () => {
-    let called = false;
-    const result = await review('read', { filePath: 'src/foo.test.ts' }, deps(() => {
-      called = true;
-      return Promise.resolve(jsonResponse(allowBody()));
-    }));
-    expect(result).toBeUndefined();
-    expect(called).toBe(false);
   });
 
   test('posts the test to TypeSafe with the bearer key', async () => {
@@ -98,26 +81,19 @@ describe('review', () => {
     expect(url).toBe('https://jev.example/v1/systemone');
   });
 
-  test('blocks a test write when the key is missing and does not call Jev', async () => {
+  test('blocks a test write without a usable key and does not call Jev', async () => {
     let called = false;
-    const result = await review('write', { filePath: 'src/foo.test.ts', content: USEFUL }, deps(() => {
+    const fetchImpl: ReviewDeps['fetch'] = () => {
       called = true;
       return Promise.resolve(jsonResponse(allowBody()));
-    }, { key: '', path: '/cfg/opencode/jevy-vet.jsonc' }));
-    expect(result).toContain('TYPESAFE_API_KEY is not set');
-    expect(result).toContain('src/foo.test.ts');
-    expect(result).toContain('/cfg/opencode/jevy-vet.jsonc');
-    expect(called).toBe(false);
-  });
-
-  test('blocks a test write when the config file cannot be read', async () => {
-    let called = false;
-    const result = await review('write', { filePath: 'src/foo.test.ts', content: USEFUL }, deps(() => {
-      called = true;
-      return Promise.resolve(jsonResponse(allowBody()));
-    }, { error: '/cfg/opencode/jevy-vet.jsonc is not valid.' }));
-    expect(result).toContain('/cfg/opencode/jevy-vet.jsonc is not valid.');
-    expect(result).toContain('src/foo.test.ts');
+    };
+    const missing = await review('write', { filePath: 'src/foo.test.ts', content: USEFUL }, deps(fetchImpl, { key: '', path: '/cfg/opencode/jevy-vet.jsonc' }));
+    expect(missing).toContain('TYPESAFE_API_KEY is not set');
+    expect(missing).toContain('src/foo.test.ts');
+    expect(missing).toContain('/cfg/opencode/jevy-vet.jsonc');
+    const unreadable = await review('write', { filePath: 'src/foo.test.ts', content: USEFUL }, deps(fetchImpl, { error: '/cfg/opencode/jevy-vet.jsonc is not valid.' }));
+    expect(unreadable).toContain('/cfg/opencode/jevy-vet.jsonc is not valid.');
+    expect(unreadable).toContain('src/foo.test.ts');
     expect(called).toBe(false);
   });
 
@@ -148,7 +124,6 @@ describe('review', () => {
       answers: { t0_title_mismatch: { noul: 0.8 } },
     }))));
     expect(result).toContain('- foo_test.go, test "TestGet"\n  Title not checked: Its title promises a behavior that none of its assertions check.\n  next: ');
-    // No assertion in the test text, so no evidence line is made up.
     expect(result).not.toContain('evidence:');
   });
 
@@ -234,7 +209,7 @@ describe('review', () => {
     expect(body).toContain(USEFUL);
   });
 
-  test('keeps the head and tail of a long test and says it was cut', async () => {
+  test('cuts only a long test and says it was cut', async () => {
     let body = '';
     const content = `test('long', () => {${'a'.repeat(20_000)}TAIL })`;
     await review('write', { filePath: 'foo.test.ts', content }, deps((_url, init) => {
@@ -250,18 +225,15 @@ describe('review', () => {
     expect(sent.test).toContain('TAIL })');
     expect(sent.test).toContain('characters cut');
     expect(parsed.questions.t0_title_mismatch.instructions).toContain('cut');
-  });
-
-  test('does not cut a test under the limit', async () => {
-    let body = '';
-    const content = `test('mid', () => {${'a'.repeat(5000)}})`;
-    await review('write', { filePath: 'foo.test.ts', content }, deps((_url, init) => {
-      body = String(init?.body);
+    let short = '';
+    const mid = `test('mid', () => {${'a'.repeat(5000)}})`;
+    await review('write', { filePath: 'foo.test.ts', content: mid }, deps((_url, init) => {
+      short = String(init?.body);
       return Promise.resolve(jsonResponse(allowBody()));
     }));
-    const parsed = JSON.parse(body) as SentBody;
-    expect(parsed.state.files[0].cases[0].test).toBe(content);
-    expect(parsed.state.files[0].cases[0].truncated).toBeUndefined();
+    const kept = JSON.parse(short) as SentBody;
+    expect(kept.state.files[0].cases[0].test).toBe(mid);
+    expect(kept.state.files[0].cases[0].truncated).toBeUndefined();
   });
 
   test('skips code-under-test questions when no code under test is found', async () => {
@@ -555,7 +527,7 @@ describe('unsure tests, user allows, and retry loops', () => {
     questions: Record<string, { type: string; instructions: string; criteria: { true: string; false: string } }>;
   }
 
-  // Answers by question id. Records every body so a test can see what was asked.
+  // Answers by question id.
   function run(answers: Record<string, unknown>, options: { history?: History; tool?: string; args?: unknown; userMessages?: string[] } = {}) {
     const bodies: Body[] = [];
     const notes: string[] = [];

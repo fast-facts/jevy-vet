@@ -10,7 +10,6 @@ import { review } from '../src/review.ts';
 import { loadSettings, type Settings } from '../src/settings.ts';
 import { checkStaleDocs } from '../src/stale.ts';
 
-// A fixed root so every case sees the same disk layout. Not a real folder.
 const ROOT = '/eval';
 const CHECKS = new Set(['review', 'instructions', 'reuse', 'hidden', 'stale', 'claims']);
 const SURE = 0.8;
@@ -34,7 +33,7 @@ export interface EvalInput {
   history?: EvalHistory;
   lastFailure?: Failure;
   instructionFiles?: InstructionFile[];
-  // Dry mode answers empty, so the rule request runs only when these sentences are already rules.
+  // Dry mode answers nothing, so only already-known sentences count as rules.
   knownRules?: string[];
   message?: string;
   steps?: Step[];
@@ -91,7 +90,6 @@ export interface RunOptions {
   maxRequests?: number;
   load?: () => Settings;
   fetch?: ReviewDeps['fetch'];
-  // The live refusal test passes this to prove the key is never logged. Nothing calls it.
   log?: (message: string) => void;
 }
 
@@ -261,7 +259,6 @@ function drySettings(): Settings {
   return { key: 'dry', baseUrl: 'https://api.typesafe.ai', path: '/eval/jevy-vet.jsonc' };
 }
 
-// A missing or unreadable key stops the run. The message never includes the key.
 function liveSettings(load: () => Settings): Settings {
   let settings: Settings;
   try {
@@ -328,7 +325,6 @@ function capture(init: RequestInit | undefined, state: CaptureState): Promise<Re
     state.captured.push({ ids, chars: text.length, answers: {}, latencyMs: 0 });
     return Promise.resolve(jsonResponse({ answers: {} }));
   }
-  // One at a time, so a 429 can back off before the next request.
   return enqueue(state.limit, () => sendLive(state, body, ids));
 }
 
@@ -561,7 +557,6 @@ function bands(scored: { score: number; confidence?: number }[]): { sure: number
   return { sure, unsure };
 }
 
-// Fraction of positive/negative pairs ranked in the right order. Ties count half.
 function pairRank(scored: { label: boolean; score: number }[]): number | undefined {
   const positives = scored.filter(item => item.label).map(item => item.score);
   const negatives = scored.filter(item => !item.label).map(item => item.score);

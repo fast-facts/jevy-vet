@@ -13,7 +13,7 @@ import { checkStaleDocs } from './stale.ts';
 import { changesFrom, commandFrom } from './subjects.ts';
 
 interface Input {
-  // The project folder. OpenCode passes it. The code under test is only read from inside it.
+  // Project folder from OpenCode. Code under test is only read from inside it.
   directory?: string;
   // Where OpenCode stops looking for project instruction files.
   worktree?: string;
@@ -38,13 +38,13 @@ interface Input {
   };
 }
 
-// The parts of a session message from the SDK's session.messages that the claim check reads.
+// Parts of session.messages the claim check reads.
 interface SessionMessage {
   info: { role: string; agent?: string; model?: { providerID: string; modelID: string }; error?: unknown };
   parts: { type: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
 }
 
-// The parts of OpenCode's chat.message output this plugin reads.
+// Parts of chat.message output this plugin reads.
 interface ChatMessage {
   parts: { type: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
 }
@@ -58,7 +58,7 @@ const KEEP_MESSAGES = 3;
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_FAILURE_CHARS = 4000;
 const KEEP_SESSIONS = 100;
-// Checks started before a tool runs and not yet collected after it. A failed tool never collects.
+// Checks started before a tool runs and not yet collected. A failed tool never collects.
 const KEEP_PENDING = 50;
 const KEEP_STEPS = 30;
 const MAX_STEP_OUTPUT_CHARS = 1000;
@@ -70,7 +70,7 @@ const NOTE_WAIT_MS = 1500;
 const LATE_TTL_MS = 5 * 60 * 1000;
 const MAX_LATE_NOTES = 20;
 
-// A note that arrived after its own result. It rides on the next result in the same session.
+// A note that missed its result. It rides on the next result in the same session.
 interface LateNote {
   path: string;
   at: number;
@@ -78,10 +78,9 @@ interface LateNote {
   text?: string;
 }
 
-// Blocks useless test writes, weakened checks, and special-cased tests. Notes unsure ones, broken instructions, repeated code, hidden errors, and stale comments.
-// When the session goes idle, it checks the agent's last message against what it did. It calls TypeSafe directly.
-// Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c).
-// TYPESAFE_BASE_URL in that file is optional.
+// Blocks bad test writes, weakened checks, and special-cased tests. Notes the unsure ones.
+// On idle, checks the agent's last message against what it did. Calls TypeSafe directly.
+// Reads TYPESAFE_API_KEY from jevy-vet.jsonc next to opencode.json(c), when a write is about to happen. TYPESAFE_BASE_URL there is optional.
 export default async function jevyVet(input: Input) {
   const root = input.directory ?? process.cwd();
   const worktree = input.worktree ?? root;

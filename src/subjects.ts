@@ -3,11 +3,7 @@ interface Subject {
   text: string;
 }
 
-// One test file in a write, edit, or patch.
-// cases: the new test text, one entry per test. Only these are judged.
-// setup: new text before the first test (imports, helpers). Context only.
-// source: all the new text for this file. Used to find imports.
-// edited: true when only part of the file is new (edit or patch update).
+// One test file in a write, edit, or patch. Only cases are judged.
 export interface TestFile {
   path: string;
   cases: string[];
@@ -19,12 +15,11 @@ export interface TestFile {
 export function testFilesFrom(tool: string, args: unknown): TestFile[] {
   const files: TestFile[] = [];
   for (const subject of subjectsFrom(tool, args)) {
-    // A helper-only edit has no new test. The edit check finds the real test on disk.
+    // A helper-only edit has no new test.
     if (tool === 'edit' && !subject.text.match(CASE_MARK)) continue;
     const parts = splitCases(subject.text);
     let cases = parts.cases;
-    // An edit hunk carries unchanged neighbor tests as context. Drop new
-    // cases identical to some old case so they are not judged as new tests.
+    // An edit hunk carries unchanged tests as context. Drop new cases identical to an old one.
     if (tool === 'edit' && isRecord(args)) {
       const oldCases = splitCases(str(args, 'oldString') ?? '').cases;
       cases = cases.filter(item => !oldCases.some(old => sameCode(item, old, subject.path)));
@@ -241,8 +236,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-// One test that an edit changed or removed. Old text is contrast evidence only.
-// added: new tests with no old match, so a renamed test is not read as a removed one.
+// One test an edit changed or removed. Old text is contrast only.
 export interface EditPair {
   path: string;
   title?: string;
@@ -251,8 +245,7 @@ export interface EditPair {
   added?: string;
 }
 
-// Old and new text of each changed test in an edit, a patch update or delete, or a write over a file on disk.
-// read(path) returns the test file as it is on disk now, if it can be read.
+// Old and new text of each changed test. read returns the file as it is on disk now.
 export function editsFrom(tool: string, args: unknown, read: (path: string) => string | undefined): EditPair[] {
   if (!isRecord(args)) return [];
   if (tool === 'edit') {
@@ -272,7 +265,7 @@ export function editsFrom(tool: string, args: unknown, read: (path: string) => s
   if (tool !== 'apply_patch') return [];
   const pairs: EditPair[] = [];
   for (const file of patchFiles(str(args, 'patchText') ?? '')) {
-    // A move only changes where the new text goes. The old tests live at this path.
+    // A move only changes where the new text goes.
     if (!isTestPath(file.path)) continue;
     if (file.op === 'delete') {
       const onDisk = read(file.path);
@@ -333,7 +326,7 @@ function sameCode(a: string, b: string, filePath: string): boolean {
   return flat(a) === flat(b);
 }
 
-// Agents explain a weakened check in a comment. Jev judges the code, not the excuse.
+// Agents explain a weakened check in a comment. Judge the code, not the excuse.
 // ponytail: not a parser. A comment marker inside a regex literal is treated as a comment.
 export function stripComments(text: string, filePath: string): string {
   const hash = /\.py$/.test(filePath);
@@ -370,15 +363,14 @@ export function stripComments(text: string, filePath: string): string {
   return out.split('\n').map(line => line.trimEnd()).filter((line, n, all) => line !== '' || (n > 0 && all[n - 1] !== '')).join('\n').trim();
 }
 
-// One file an edit changes, test or not. Old text is contrast evidence only.
+// One file an edit changes, test or not. Old text is contrast only.
 export interface Change {
   path: string;
   old?: string;
   new: string;
 }
 
-// What write, edit, and apply_patch change, for any path.
-// read(path) returns the file as it is on disk now, if it can be read.
+// What write, edit, and apply_patch change. read returns the file as it is on disk now.
 export function changesFrom(tool: string, args: unknown, read: (path: string) => string | undefined): Change[] {
   if (!isRecord(args)) return [];
   const filePath = str(args, 'filePath') ?? '';
@@ -414,7 +406,7 @@ export function changesFrom(tool: string, args: unknown, read: (path: string) =>
   return changes;
 }
 
-// Files that set what CI, the tests, lint, type checks, and git hooks enforce.
+// Files that set what CI, tests, lint, type checks, and hooks enforce.
 const GATE_FILES = new Set([
   'package.json', 'bunfig.toml', 'deno.json', 'deno.jsonc', 'biome.json', 'biome.jsonc', '.eslintignore', '.nycrc', '.c8rc', 'codecov.yml',
   '.gitlab-ci.yml', 'azure-pipelines.yml', 'bitbucket-pipelines.yml', 'Jenkinsfile', 'Makefile',
@@ -459,8 +451,7 @@ export function commandFrom(tool: string, args: unknown): Command | undefined {
 const TEST_DIRS = new Set(['tests', '__tests__', 'spec', 'e2e']);
 const GATE_WORDS = new Set(['git', 'pkg', 'set-script', 'HUSKY']);
 
-// Scope only, like isTestPath. Jev decides whether the command weakens a check.
-// A command that names none of those words, a test, or a check file is not asked about, so `ls` or `bun test` costs no call.
+// Scope only. A command naming none of these costs no call.
 export function touchesGates(command: string): boolean {
   return command.split(/[\s'"`;&|<>()=]+/).some(word => {
     const path = word.replace(/\/+$/, '');
@@ -529,8 +520,7 @@ export function definitionsIn(text: string, filePath: string): Definition[] {
   return found;
 }
 
-// Helpers, fixtures, and mocks that tests use. Canned values belong there, so the special-case check skips them.
-// Takes a path relative to the project, so a project inside a folder named test is not skipped.
+// Helpers, fixtures, and mocks that tests use. Takes a path relative to the project.
 const SUPPORT_DIRS = new Set([...TEST_DIRS, 'test', 'testing', 'fixtures', '__fixtures__', '__mocks__', 'mocks', 'testdata', 'testutil', 'testutils']);
 
 export function isTestSupport(filePath: string): boolean {
@@ -542,7 +532,7 @@ export function isTestSupport(filePath: string): boolean {
 }
 
 export interface Literal {
-  // A string's text without quotes, or a number as written. '42' and 42 match.
+  // A string's text without quotes, or a number as written.
   value: string;
   line: number;
 }
@@ -566,7 +556,7 @@ export function isCommentLine(line: string): boolean {
   return COMMENT_LINE.test(line) && !/^\s*#[[!]/.test(line);
 }
 
-// Loop bounds and indexes more often than test data.
+// Loop bounds and indexes more often than data.
 const COMMON_NUMBERS = new Set(['0', '1', '2', '-1', '10', '100']);
 
 // ponytail: quotes and digits per line, not a lexer. A string over several lines, or a comment after code, is read roughly.

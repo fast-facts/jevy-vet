@@ -2,9 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-
-// A real OpenCode process, with no model key and no TypeSafe key.
-// OPENCODE_PURE would skip this plugin, so it is not set.
+import { isRecord } from '../src/jev.ts';
 
 const REPO = join(import.meta.dir, '..');
 const RUN_MS = 180_000;
@@ -103,13 +101,13 @@ const root = mkdtempSync(join(tmpdir(), 'jevy-smoke-'));
 const home = join(root, 'home');
 mkdirSync(join(home, '.config', 'opencode'), { recursive: true });
 writeFileSync(join(home, '.config', 'opencode', 'jevy-vet.jsonc'), `{
-  // dummy key. The plugin must read this file, not the environment.
+  // Dummy key read from this file, never the environment.
   "TYPESAFE_API_KEY": "smoke-key",
-  "TYPESAFE_BASE_URL": "http://127.0.0.1:${String(judge.port)}"
+  "TYPESAFE_BASE_URL": "http://127.0.0.1:${judge.port}"
 }
 `);
 
-const env = isolated(home, configJson(`http://127.0.0.1:${String(model.port)}/v1`));
+const env = isolated(home, configJson(`http://127.0.0.1:${model.port}/v1`));
 const results: Scenario[] = [];
 let lastMessages = '';
 
@@ -258,7 +256,6 @@ async function syntheticFollowUp(url: string, id: string, project: string): Prom
 async function chat(request: Request): Promise<Response> {
   const body: unknown = await request.json();
   const text = JSON.stringify(body);
-  // Title generation is a side request. It must not take a scripted tool call.
   if (text.includes('Generate a title')) return new Response(sse({ text: 'Smoke title' }), { headers: sseHeaders() });
   modelHits.push(text);
   const turn = turns.shift() ?? { text: 'ok' };
@@ -469,8 +466,4 @@ function explain(run: Run, why: string): string {
   const tail = run.stderr.slice(-800);
   const last = modelHits.at(-1)?.slice(0, 240) ?? '';
   return `${why}; exit ${String(run.code)}; questions ${ids.join(',') || 'none'}; odd ${oddPaths.slice(0, 4).join(',') || 'none'}; stderr ${tail || 'none'}; last model ${last || 'none'}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -1,10 +1,10 @@
 import { headTail, sentencesOf } from './context.ts';
 import { askedFor, callTypeSafe, choiceLevel, cut, type Finding, isRecord, latestUserMessages, listed, logOnce, MAX_LISTED, oneLine, type Question, type ReviewDeps, userAsked } from './jev.ts';
 
-// The claim check. It runs when the session goes idle, so the turn is over and nothing can be blocked.
+// Runs when the session goes idle, so nothing can be blocked.
 const MAX_CLAIMS = 8;
 const MAX_SENT_OUTPUT_CHARS = 1000;
-// Scope only, like touchesGates. A final message with none of these words makes no claim worth a call.
+// Scope only. A final message without these words makes no claim worth a call.
 const CLAIM_WORDS = /\b(?:pass\w*|fail\w*|green|fix\w*|resolv\w*|works?|working|clean|lint\w*|type-?check\w*|types?|tests?|build\w*|compil\w*|verif\w*|done|complete\w*|updat\w*|add\w*|chang\w*|remov\w*|renam\w*|creat\w*|implement\w*)\b/i;
 const CLAIM_CHOICES = {
   supported: 'The steps show it, or the sentence is not a claim about work done since the user\'s last message, for example a plan, a question, a caveat, or advice.',
@@ -15,7 +15,7 @@ const CLAIM_CHOICES = {
 };
 const RERUN = 'Run the whole check now and report what it prints. If it fails, fix it or say that it fails.';
 const REDO = 'Make the change, or correct the message to say what was really changed.';
-// Findings only. supported is not a finding.
+// supported is not a finding.
 const BAD_CLAIMS: Record<string, { fail: string; next: string }> = {
   failed_run: { fail: 'Claim contradicted: The last run of that check failed.', next: RERUN },
   partial_run: { fail: 'Claim too broad: The last run covered only some of the tests or checks.', next: RERUN },
@@ -58,7 +58,7 @@ interface ClaimRequest {
   questions: Record<string, Question>;
 }
 
-// followUp goes to the agent, only when Jev is sure. note goes to the user.
+// followUp goes to the agent, only when sure. note goes to the user.
 export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ followUp?: string; note: string } | undefined> {
   const claims = sentencesOf(message).filter(sentence => CLAIM_WORDS.test(sentence)).slice(0, MAX_CLAIMS);
   if (claims.length === 0) return;
@@ -67,7 +67,7 @@ export async function checkClaims(message: string, deps: ClaimDeps): Promise<{ f
 
   const once = logOnce(deps);
   const userMessages = latestUserMessages(deps.userMessages ?? []);
-  // Earlier committed work still backs a summary. Skipped when empty so the first turn is unchanged.
+  // Earlier committed work still backs a summary.
   const past = deps.pastSteps ?? [];
   const hasPast = past.length > 0;
   const when = hasPast ? 'in this session' : 'since the user\'s last message';
@@ -153,7 +153,7 @@ function slimSteps(list: Step[], claims: string[]): SentStep[] {
   });
 }
 
-// Copied from the steps, so the agent sees what the plugin saw. Jev picked the kind.
+// Copied from the steps, so the agent sees what the plugin saw.
 function claimEvidence(choice: string, steps: Step[]): string {
   const edits = steps.filter((step): step is Edited => 'edited' in step);
   const commands = steps.filter((step): step is RanCommand => 'command' in step);

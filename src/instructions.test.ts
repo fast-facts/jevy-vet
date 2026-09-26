@@ -17,7 +17,6 @@ describe('instruction check', () => {
   }
   type Answer = (id: string, body: Sent) => Record<string, unknown> | undefined;
 
-  // Answers every question it is sent. Rules contain "Do not", "Never", or "Only".
   const rules: Answer = (id, body) => {
     const n = Number(/^s(\d+)_/.exec(id)?.[1]);
     const text = body.state.sentences?.[n]?.text ?? '';
@@ -94,20 +93,17 @@ describe('instruction check', () => {
     expect(Object.keys(check?.questions ?? {})).toEqual(['c0_i0_breaks']);
   });
 
-  test('asks each sentence once, across edits', async () => {
+  test('asks each sentence once, across edits, and forgets unanswered ones', async () => {
     const cache = new Map<string, boolean>();
     const { sent, fetchImpl } = judge(breaks(() => false));
     expect(await checkInstructions('edit', edit, instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': AGENTS }, cache }))).toBeUndefined();
     expect(await checkInstructions('edit', edit, instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': AGENTS }, cache }))).toBeUndefined();
     expect(sent.map(body => body.state.sentences ? 'extract' : 'check')).toEqual(['extract', 'check', 'check']);
     expect([...cache.values()]).toEqual([true, false, false]);
-  });
-
-  test('does not remember a sentence Jev did not answer', async () => {
-    const cache = new Map<string, boolean>();
-    const { fetchImpl } = judge(() => undefined);
-    expect(await checkInstructions('edit', edit, instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': AGENTS }, cache }))).toBeUndefined();
-    expect(cache.size).toBe(0);
+    const emptyCache = new Map<string, boolean>();
+    const { fetchImpl: silent } = judge(() => undefined);
+    expect(await checkInstructions('edit', edit, instructionDeps(silent, { files: { '/repo/AGENTS.md': AGENTS }, cache: emptyCache }))).toBeUndefined();
+    expect(emptyCache.size).toBe(0);
   });
 
   test('takes rules from the user\'s messages, and a later message can lift a rule', async () => {
@@ -180,7 +176,7 @@ describe('instruction check', () => {
     expect(sent).toHaveLength(0);
   });
 
-  test('skips quietly without a key or with an unreadable config, and never blocks', async () => {
+  test('skips quietly without a key or config, and logs once when TypeSafe fails', async () => {
     const { sent, fetchImpl } = judge(breaks(() => true));
     const files = { '/repo/AGENTS.md': AGENTS };
     expect(await checkInstructions('edit', edit, instructionDeps(fetchImpl, { files, settings: { key: '' } }))).toBeUndefined();
@@ -188,13 +184,10 @@ describe('instruction check', () => {
     expect(await checkInstructions('edit', edit, broken)).toBeUndefined();
     expect(broken.logs).toEqual([]);
     expect(sent).toHaveLength(0);
-  });
-
-  test('adds no note when TypeSafe fails, and logs it once', async () => {
-    const d = instructionDeps(() => Promise.reject(new Error('offline')), { files: { '/repo/AGENTS.md': AGENTS } });
+    const d = instructionDeps(() => Promise.reject(new Error('offline')), { files });
     expect(await checkInstructions('edit', edit, d)).toBeUndefined();
     expect(d.logs).toEqual(['TypeSafe request failed. No instruction note was added.']);
-    const down = instructionDeps(() => Promise.resolve(jsonResponse({ error: 'down' }, 503)), { files: { '/repo/AGENTS.md': AGENTS }, cache: new Map([['file\nDo not change `src/api.ts` signatures.', true]]) });
+    const down = instructionDeps(() => Promise.resolve(jsonResponse({ error: 'down' }, 503)), { files, cache: new Map([['file\nDo not change `src/api.ts` signatures.', true]]) });
     expect(await checkInstructions('edit', edit, down)).toBeUndefined();
     expect(down.logs).toEqual(['TypeSafe returned 503. No instruction note was added.']);
   });

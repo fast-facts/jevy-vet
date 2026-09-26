@@ -6,9 +6,9 @@
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/fast-facts/jevy-vet/master.cron.code-analyze.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=CodeQL)](https://github.com/fast-facts/jevy-vet/actions/workflows/master.cron.code-analyze.yml)
 [![license](https://img.shields.io/github/license/fast-facts/jevy-vet?style=for-the-badge)](./LICENSE)
 
-An OpenCode plugin that stops a weak test before the file is written. It also stops a change that turns a check off, or that fakes a test's answer. It tells the agent when an edit may break your instructions, repeat code you already have, hide an error, or leave a comment or doc wrong. It also tells the agent when its last message claims more than it did.
+An OpenCode plugin that blocks a weak test, a weakened check, or a faked test answer before the file is written. It warns when an edit may break your instructions, repeat code, hide an error, or leave a comment or doc wrong. It also flags when its last message claims more than it did.
 
-When an agent adds or changes a test, the plugin asks TypeSafe Jev if a new test is useless, or if a changed test no longer checks the same thing. If Jev is sure, the write is blocked. You do not set up Jev yourself. The plugin calls TypeSafe.
+It asks TypeSafe Jev. If Jev is sure, the write is blocked. You do not set up Jev yourself.
 
 ## Install
 
@@ -94,7 +94,7 @@ The message shows the lines that changed. It tells the agent to fix the code, or
 
 ## When you asked for the change
 
-Your own words allow the edit. This covers every check on this page. The plugin keeps your last three messages for that session, in memory only, and sends the latest one with the edit so Jev can tell.
+Your own words allow the edit. This covers every check on this page. The plugin keeps your last three messages for that session and sends the latest one with the edit.
 
 Asking to fix a failure, or to make the tests pass, does not count. A prompt written by another agent does not count. With no message from you, nothing is treated as asked for.
 
@@ -114,7 +114,7 @@ When Jev is sure, the change is blocked. When it is not sure, it goes through wi
 
 ## What the agent says it did
 
-When the agent finishes and the session goes idle, the plugin reads its last message and asks Jev whether the claims in it are backed by what happened since your last message. For example, "all tests pass" when the last test run failed, ran only one file, or came before the last edit, "fixed" when nothing was changed, or "lint is clean" when lint never ran. Jev sees the commands the agent ran, with their exit codes and output, and the files it changed, in order.
+When the agent finishes and the session goes idle, the plugin reads its last message and asks Jev whether the claims in it are backed by what happened since your last message. For example, "all tests pass" when the last test run failed or came before the last edit, "fixed" when nothing changed, or "lint is clean" when lint never ran. Jev sees the commands run, with exit codes and output, and the files changed, in order.
 
 The turn is already over, so nothing is blocked. When Jev is sure, the plugin sends the agent one follow-up to fix it or correct its message, and shows you a toast. From 0.5 up to sure, you only get the toast. Below that, it says nothing. It checks once per message from you, never checks its own follow-up, and skips subagents. If you told the agent not to run the checks, there is no follow-up.
 
@@ -173,7 +173,7 @@ A test write is blocked when the config file is missing, cannot be read, or has 
 
 ## What this does not do
 
-It does not run the test. It does not prove the test would catch a real bug. You still need to run the tests for that.
+It does not run the test. It does not prove the test would catch a real bug. Run the tests for that.
 
 It can be wrong about your instructions, either way. It does not undo the edit.
 
@@ -184,7 +184,7 @@ bun test
 bun run smoke
 ```
 
-The tests do not need an API key. `bun run smoke` runs the plugin inside OpenCode, against fake servers only. It skips if `opencode` is not installed. GitHub Actions installs OpenCode 1.x and runs it.
+The tests need no API key. `bun run smoke` runs the plugin inside OpenCode, against fake servers only. It skips if `opencode` is not installed.
 
-`bun run eval` calls the real checks on the cases in `eval/cases` and does not need a key.
+`bun run eval` runs the real checks on the cases in `eval/cases` with no key.
 `bun run eval -- --live` sends one capped run to TypeSafe. It reads the key only through `loadSettings`.

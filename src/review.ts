@@ -3,8 +3,8 @@ import { afterChange, askedFor, callTypeSafe, choiceLevel, cut, type Failure, ty
 import { INDEX_WAIT_MS, indexFromDisk, type ProjectIndex, type SourceFile } from './project.ts';
 import { changesFrom, type Command, commandFrom, definitionsIn, type EditPair, editsFrom, isDefinitionFile, isGatePath, isTestSupport, type Literal, literalsIn, splitCases, stripComments, type TestFile, testFilesFrom, titleOf, touchesGates } from './subjects.ts';
 
-// Jev allows 32k tokens for state plus the longest question, and 64k for state plus all questions.
-// A token is at least 3 characters of code, so these stay well inside both.
+// Jev caps state plus longest question at 32k tokens, and state plus all questions at 64k.
+// A token is at least 3 code chars, so these stay well inside both.
 const MAX_CASE_CHARS = 6_000;
 const MAX_STATE_CHARS = 72_000;
 // Re-cut per batch; contextFor() keeps larger limits for other callers.
@@ -108,7 +108,7 @@ const CLAIMS: readonly Claim[] = [
   },
 ];
 
-// How the checks of one existing test changed. Code pairs old and new. Jev judges.
+// How one existing test's checks changed. Jev judges.
 const CHANGES: Record<string, string> = {
   stronger: 'The new test checks everything the old one did, and more.',
   equivalent: 'The new test checks the same behavior with the same strictness, only written differently: renamed, reformatted, or refactored.',
@@ -560,8 +560,8 @@ function editBatches(edits: Edit[], userMessages: string[], files: TestFile[], r
   return out;
 }
 
-// Tests added in other files by the same change. Only sent when this edit removes a test
-// outright, so Jev can judge a move across files as a replacement. Jev alone decides.
+// Tests added in other files by the same change. Only sent when this edit removes
+// a test outright, so Jev can judge a move across files as a replacement.
 function movedTests(edit: Edit, edits: Edit[], files: TestFile[]): string | undefined {
   if (edit.new !== '') return;
   const out: string[] = [];
@@ -807,7 +807,7 @@ function noteText(unsure: Finding[]): string {
   ].join('\n');
 }
 
-// The old and new lines that differ, so the agent sees what it changed. Comments are already removed.
+// The old and new lines that differ. Comments are already removed.
 function evidence(oldText: string, newText: string): string[] {
   const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(line => line !== '');
   const before = lines(oldText);
@@ -817,7 +817,8 @@ function evidence(oldText: string, newText: string): string[] {
   return [...removed, ...(added.length > 0 ? added : ['  now: (removed)'])];
 }
 
-// The special-case check. It blocks like a weakened test: code that returns what a test expects hides the same failure.
+// The special-case check. Blocks like a weakened test: code returning what a test
+// expects hides the same failure.
 const MAX_SPECIAL_CHANGES = 5;
 const MAX_SPECIAL_CASES = 3;
 const MAX_SPECIAL_CASE_CHARS = 3000;

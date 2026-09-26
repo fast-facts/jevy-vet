@@ -6,22 +6,21 @@ import { prepareStaleDocs } from './stale.ts';
 
 export type NotesDeps = InstructionDeps & HiddenDeps;
 
-// Off until a live A/B shows the merged request keeps precision on the
-// reuse, hidden, stale, and instruction sets. The split path stays default.
+// Off until a live A/B shows the merged request keeps precision.
 let NOTES_MERGED = false;
 export function notesMerged(): boolean {
   return NOTES_MERGED;
 }
-// Tests only. Production leaves the default off until the A/B lands.
+// Tests only. Production stays off until the A/B lands.
 export function setNotesMerged(value: boolean): void {
   NOTES_MERGED = value;
 }
 
-// One shared intent question per file, instead of one per check. Off: kept
+// One shared intent question per file instead of per check. Off: kept
 // only if an A/B shows no precision loss.
 const SHARED_INTENT_PER_FILE = false;
 
-// Chars, at 3 chars per token. Past either, or past the question limit,
+// Chars, at 3 per token. Past either limit, or past the question limit,
 // the combined request falls back to one request per check.
 const MAX_STATE_PLUS_LONGEST = 72_000;
 const MAX_STATE_PLUS_ALL = 150_000;
@@ -50,9 +49,8 @@ interface Candidate {
   allowed: string;
 }
 
-// One TypeSafe request for the four note checks. The sentence requests stay
-// separate and run first, inside the instruction prepare. Review and claims
-// are not merged. Note wording is unchanged; only question paths gain a prefix.
+// One TypeSafe request for the four note checks. Sentence requests stay
+// separate and run first. Only question paths gain a prefix.
 export async function checkNotes(tool: string, args: unknown, deps: NotesDeps): Promise<string | undefined> {
   // Invoked together, so every sync disk read runs before the first await.
   const [instruction, reuse, hidden, stale] = await Promise.all([
@@ -118,7 +116,6 @@ export async function checkNotes(tool: string, args: unknown, deps: NotesDeps): 
   return finishParts(parts, answers);
 }
 
-// Old state minus the shared purpose and user messages.
 function bodyOf(state: { purpose: string; user_messages?: string[] }): Record<string, unknown> {
   const body: Record<string, unknown> = { ...state };
   delete body.purpose;
@@ -126,8 +123,7 @@ function bodyOf(state: { purpose: string; user_messages?: string[] }): Record<st
   return body;
 }
 
-// Prefix question ids and rewrite their state paths to the merged section.
-// Only paths change; no other wording changes.
+// Prefix ids and rewrite state paths to the merged section. Only paths change.
 function rewrite(questions: Record<string, Question>, prefix: string, names: string[]): Record<string, Question> {
   const out: Record<string, Question> = {};
   for (const [id, question] of Object.entries(questions)) {
@@ -138,8 +134,8 @@ function rewrite(questions: Record<string, Question>, prefix: string, names: str
   return out;
 }
 
-// Intent questions stay one per check and change, with their own asks. Only
-// the same intent on the same change text would dedupe, and none do today.
+// Intent questions stay one per check and change. Only the same intent
+// on the same change text would dedupe, and none do today.
 function dedupeSharedIntents(parts: Part[]): void {
   if (!SHARED_INTENT_PER_FILE) return;
   void parts;

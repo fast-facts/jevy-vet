@@ -4,14 +4,11 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import plugin from './index.ts';
 import { CLASSIFY_ON_MESSAGE } from './instructions.ts';
+import { jsonResponse } from './fakes.test.ts';
 import { clearAnswerCache } from './jev.ts';
 import { setNotesMerged } from './notes.ts';
 
 const USEFUL = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-}
 
 function allowBody() {
   const answer = { type: 'noul', noul: 0.1 };
@@ -47,7 +44,6 @@ async function usingPlugin(
   const savedHome = process.env.HOME;
   const savedFetch = globalThis.fetch;
   process.env.XDG_CONFIG_HOME = root;
-  // So a real ~/.claude/CLAUDE.md on this machine is not read.
   process.env.HOME = root;
   if (config !== undefined) {
     const dir = join(root, 'opencode');
@@ -56,7 +52,6 @@ async function usingPlugin(
   }
   globalThis.fetch = fetchImpl as typeof fetch;
   try {
-    // Each run starts empty, so one test never answers another.
     clearAnswerCache();
     await run(await plugin({ directory: directory ?? join(root, 'project'), client: { app: { log }, ...client } }));
   } finally {
@@ -273,25 +268,33 @@ describe('plugin', () => {
     }, () => Promise.reject(new Error('log down')));
   });
 
+  interface NoteSent {
+    state: { sentences?: { text: string }[] };
+    questions: Record<string, unknown>;
+  }
+  // Every "Do not" sentence is a rule, and every change breaks every rule.
+  function noteAnswers(body: NoteSent): Record<string, unknown> {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(body.questions)) {
+      const n = Number(/^s(\d+)_/.exec(id)?.[1]);
+      if (id.endsWith('_limits')) answers[id] = { type: 'noul', noul: /Do not/.test(body.state.sentences?.[n]?.text ?? '') ? 0.9 : 0.1 };
+      else if (id.endsWith('_style')) answers[id] = { type: 'noul', noul: 0.1 };
+      else if (id.endsWith('_breaks')) answers[id] = { type: 'noul', noul: 0.9 };
+      else if (id.endsWith('_lifted')) answers[id] = { type: 'noul', noul: 0.1 };
+    }
+    return answers;
+  }
+
   describe('instruction notes', () => {
     interface Sent {
       state: { sentences?: { text: string }[]; instructions?: { from: string; text: string }[]; changes?: { path: string; old?: string; new: string }[]; user_messages?: string[] };
       questions: Record<string, unknown>;
     }
-    // Every "Do not" sentence is a rule, and every change breaks every rule.
     function strict(sent: Sent[]): FakeFetch {
       return (_input, init) => {
         const body = JSON.parse(String(init?.body)) as Sent;
         sent.push(body);
-        const answers: Record<string, unknown> = {};
-        for (const id of Object.keys(body.questions)) {
-          const n = Number(/^s(\d+)_/.exec(id)?.[1]);
-          if (id.endsWith('_limits')) answers[id] = { type: 'noul', noul: /Do not/.test(body.state.sentences?.[n]?.text ?? '') ? 0.9 : 0.1 };
-          else if (id.endsWith('_style')) answers[id] = { type: 'noul', noul: 0.1 };
-          else if (id.endsWith('_breaks')) answers[id] = { type: 'noul', noul: 0.9 };
-          else if (id.endsWith('_lifted')) answers[id] = { type: 'noul', noul: 0.1 };
-        }
-        return Promise.resolve(jsonResponse({ answers }));
+        return Promise.resolve(jsonResponse({ answers: noteAnswers(body) }));
       };
     }
 
@@ -720,11 +723,9 @@ describe('plugin', () => {
     });
   });
   describe('late notes', () => {
-    const realSetTimeout = globalThis.setTimeout;
-    const tick = () => new Promise<void>(resolve => realSetTimeout(() => resolve(), 5));
-
     // Let held fetches answer: sentences first, then the rules they unlock.
     async function settle(held: { releaseAll: () => void }) {
+      const tick = () => new Promise<void>(resolve => globalThis.setTimeout(() => resolve(), 5));
       held.releaseAll();
       await tick();
       held.releaseAll();
@@ -736,18 +737,6 @@ describe('plugin', () => {
     interface LateSent {
       state: { sentences?: { text: string }[] };
       questions: Record<string, unknown>;
-    }
-
-    function strictAnswers(body: LateSent): Record<string, unknown> {
-      const answers: Record<string, unknown> = {};
-      for (const id of Object.keys(body.questions)) {
-        const n = Number(/^s(\d+)_/.exec(id)?.[1]);
-        if (id.endsWith('_limits')) answers[id] = { type: 'noul', noul: /Do not/.test(body.state.sentences?.[n]?.text ?? '') ? 0.9 : 0.1 };
-        else if (id.endsWith('_style')) answers[id] = { type: 'noul', noul: 0.1 };
-        else if (id.endsWith('_breaks')) answers[id] = { type: 'noul', noul: 0.9 };
-        else answers[id] = { type: 'noul', noul: 0.1 };
-      }
-      return answers;
     }
 
     // The after hook races the note against a timer. Shrink it so tests stay fast.
@@ -789,7 +778,7 @@ describe('plugin', () => {
         });
       };
       const releaseAll = () => {
-        for (const item of waiting.splice(0)) item.resolve(jsonResponse({ answers: strictAnswers(item.body) }));
+        for (const item of waiting.splice(0)) item.resolve(jsonResponse({ answers: noteAnswers(item.body) }));
       };
       return { fetchImpl, releaseAll };
     }

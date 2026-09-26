@@ -3,8 +3,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { candidatePaths, type Disk, DOC_FILE, GENERATED_MARK, GENERATED_NAME, gitignorePatterns, headTail, MAX_DOC_SECTION_CHARS, MAX_DOC_SECTIONS, MAX_LISTED_ENTRIES, MAX_RELATED_TESTS, MAX_SOURCE_FILE_CHARS, MAX_SOURCE_FILES, NOT_DOCS, SKIP_DIRS } from './context.ts';
 import { isCodeFile, isTestPath } from './subjects.ts';
 
-// One shared walk of the project for the reuse, special-case, and stale-comment checks.
-// The listing is read once and cached. File text is read lazily and re-read when its stat changes.
+// One shared walk for the reuse, special-case, and stale-comment checks. Listing is cached; text is lazy.
 export interface AsyncDisk {
   root: string;
   read: (path: string) => Promise<string | undefined>;
@@ -25,9 +24,9 @@ export interface DocSection {
   text: string;
 }
 
-// How long the blocking check waits for the first walk before it skips retrieval.
+// How long the blocking check waits for the first walk.
 export const INDEX_WAIT_MS = 1000;
-// A listing older than this is read again on next use.
+// A listing older than this is read again.
 const INDEX_TTL_MS = 60_000;
 const INDEX_CONCURRENCY = 16;
 // Chars, close enough to bytes for cache eviction.
@@ -69,7 +68,7 @@ export class ProjectIndex {
     }
   }
 
-  // Source files, skipping tests and the given absolute paths. The caller reads changed files itself.
+  // Source files, skipping tests and the given paths.
   async sourceFiles(skip: Set<string>): Promise<SourceFile[]> {
     await this.ensure();
     const out: SourceFile[] = [];
@@ -83,7 +82,7 @@ export class ProjectIndex {
     return out;
   }
 
-  // Tests whose code under test, found the way contextFor finds it, includes this file.
+  // Tests whose code under test includes this file.
   async relatedTests(sourcePath: string): Promise<SourceFile[]> {
     await this.ensure();
     const target = resolve(this.root, sourcePath);
@@ -99,7 +98,7 @@ export class ProjectIndex {
     return found;
   }
 
-  // Retrieval only, at most five. Instruction files and changelogs are skipped: they are the user's rules, or they are right to describe old behavior.
+  // Retrieval only, at most five. Instruction files and changelogs are skipped.
   async docSections(names: string[]): Promise<DocSection[]> {
     if (names.length === 0) return [];
     await this.ensure();
@@ -133,12 +132,12 @@ export class ProjectIndex {
     return found;
   }
 
-  // Forget cached text for paths a call changed, so the next view re-reads them.
+  // Forget cached text for paths a call changed.
   markStale(paths: string[]): void {
     for (const path of paths) this.drop(resolve(this.root, path));
   }
 
-  // Forget the listing, so it is read again on next use. Called after any bash command.
+  // Forget the listing. Called after any bash command.
   markListingStale(): void {
     this.paths = undefined;
   }
@@ -179,7 +178,7 @@ export class ProjectIndex {
     this.textBytes -= cached.text.length;
   }
 
-  // File names next to a test, for the Go mapping. Only recorded code and markdown names are known.
+  // File names next to a Go test.
   private dirNames(testPath: string): string[] {
     if (extname(testPath) !== '.go') return [];
     const dir = dirname(testPath);
@@ -233,7 +232,7 @@ export class ProjectIndex {
   }
 }
 
-// Production disk access. Missing, unreadable, or huge files count as absent.
+// Missing, unreadable, or huge files count as absent.
 export function productionAsyncDisk(root: string): AsyncDisk {
   return {
     root,
@@ -263,7 +262,7 @@ export function productionAsyncDisk(root: string): AsyncDisk {
   };
 }
 
-// A throwaway index over a synchronous disk. Used when no shared index was passed, as in eval.
+// A throwaway index over a sync disk, used when no shared index was passed.
 export function indexFromDisk(disk: Disk): ProjectIndex {
   return new ProjectIndex({
     root: disk.root,

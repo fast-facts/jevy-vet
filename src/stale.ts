@@ -4,8 +4,7 @@ import { afterChange, askedFor, callTypeSafe, cut, type Finding, ignoredPath, la
 import { indexFromDisk } from './project.ts';
 import { type Change, changesFrom, type Definition, definitionsIn, isCommentLine, isDefinitionFile, isTestSupport } from './subjects.ts';
 
-// The stale-comment check. It notes and never blocks: a wrong comment misleads the next reader, but the code runs as written.
-// It notes only when Jev is sure, like the reuse and hidden-error checks.
+// Notes, never blocks. A wrong comment misleads but the code still runs.
 const MAX_STALE_CHANGES = 5;
 const MAX_COMMENTS_PER_CHANGE = 4;
 const MAX_COMMENTS = 12;
@@ -25,10 +24,10 @@ interface Comment {
   name: string;
   path: string;
   line?: number;
-  // The line shown in the note: a comment's first line, or the doc line that names the function.
+  // The line shown in the note.
   quote: string;
   text: string;
-  // This change wrote or changed the comment, so it is checked the other way round: does the code do what it says.
+  // This change wrote the comment, so check the code matches it.
   edited?: true;
   doc?: true;
 }
@@ -60,15 +59,14 @@ export interface StalePrep {
   finish: (answers: Record<string, unknown> | undefined) => string | undefined;
 }
 
-// The changed files are read before the first await, so the caller must invoke
-// this without awaiting anything else first. It does no network itself.
+// Reads disk before the first await. Call without awaiting first. No network.
 export async function prepareStaleDocs(tool: string, args: unknown, deps: ReviewDeps): Promise<StalePrep | undefined> {
   const disk = deps.disk;
   if (!disk) return;
   const read = reader(disk);
   const found: Stale[] = [];
   const comments: Comment[] = [];
-  // A doc this same call changes is read after the tool may have written it, so it is left out.
+  // Skip a doc this same call changes; it is read after the write.
   const changedDocs = new Set<string>();
   for (const change of changesFrom(tool, args, read)) {
     const path = shownPath(disk.root, change.path);
@@ -87,10 +85,10 @@ export async function prepareStaleDocs(tool: string, args: unknown, deps: Review
     const addedCode = addedLines.filter(line => !prose.has(line));
     const removedCode = [...oldLines].filter(line => line !== '' && !newLines.has(line) && !prose.has(line));
     const codeChanged = addedCode.length > 0 || removedCode.length > 0;
-    // A removed comment, with no code change, is not in scope. An added comment is.
+    // A removed comment with no code change is out of scope.
     if (!codeChanged && addedLines.length === 0) continue;
 
-    // A removed line is only in the file as it was.
+    // A removed line is only in the old file.
     const removedIn = new Set(
       definitionsIn(onDisk ?? change.old ?? '', change.path)
         .filter(item => removedCode.some(line => item.code.includes(line)))
@@ -102,7 +100,7 @@ export async function prepareStaleDocs(tool: string, args: unknown, deps: Review
     const fn = touched.at(-1);
     const name = fn ? `function "${fn.name}"` : 'top-level code';
     const codeAt = lines.findIndex(line => addedCode.includes(line.trim()));
-    // A patch with several hunks cannot be placed, so it has no line numbers.
+    // A multi-hunk patch cannot be placed, so it has no line numbers.
     const lineOf = (line: number) => (after === undefined ? {} : { line });
     let code: Pick<Stale, 'code' | 'line' | 'removed'> = { code: '' };
     if (codeAt >= 0) code = { code: lines[codeAt]?.trim() ?? '', ...lineOf(codeAt + 1) };
@@ -114,7 +112,7 @@ export async function prepareStaleDocs(tool: string, args: unknown, deps: Review
       const edited = block.lines.some(line => addedLines.includes(line.trim()));
       // Unchanged code cannot make an unchanged comment wrong.
       if (!edited && !codeChanged) continue;
-      // A bare /** or """ says nothing, so the first line with a word is shown.
+      // A bare /** says nothing, so show the first line with a word.
       const wordAt = block.lines.findIndex(line => /\w/.test(line));
       const quoted = wordAt < 0 ? 0 : wordAt;
       comments.push({
@@ -137,7 +135,7 @@ export async function prepareStaleDocs(tool: string, args: unknown, deps: Review
   const settings = deps.load();
   if (settings.error || settings.key.trim() === '') return;
 
-  // Let the tool start. The changed files were read above.
+  // Let the tool start; changed files were read above.
   await new Promise(resolve => setTimeout(resolve, 0));
   const project = deps.project ?? indexFromDisk(disk);
   const sections = await project.docSections([...new Set(found.flatMap(item => item.names))]).catch(() => undefined);
@@ -197,7 +195,6 @@ export async function prepareStaleDocs(tool: string, args: unknown, deps: Review
   };
 }
 
-// Thin wrapper: prepare, one request, finish. Kept so the single-check path stays the same.
 export async function checkStaleDocs(tool: string, args: unknown, deps: ReviewDeps): Promise<string | undefined> {
   const prep = await prepareStaleDocs(tool, args, deps);
   if (!prep) return;
@@ -239,7 +236,7 @@ function finishStaleDocs(found: Stale[], asked: Comment[], once: ReviewDeps, ans
   ].join('\n');
 }
 
-// Comment lines and the lines of a Python docstring, trimmed. Other triple-quoted strings count too.
+// Comment lines and Python docstrings, trimmed.
 function proseLines(text: string): string[] {
   const found: string[] = [];
   let quote = '';
@@ -261,8 +258,7 @@ function proseLines(text: string): string[] {
   return found;
 }
 
-// The doc comment above each touched function and the comments inside it, or above the first changed line when no function is touched.
-// Rough: only line comments and Python docstrings. A trailing comment after code is not seen.
+// Doc comment above each touched function and comments inside it. Only line comments and Python docstrings.
 function commentBlocks(lines: string[], touched: Definition[], codeAt: number): { line: number; lines: string[]; name?: string }[] {
   const blocks: { line: number; lines: string[]; name?: string }[] = [];
   const seen = new Set<number>();
@@ -285,7 +281,7 @@ function commentBlocks(lines: string[], touched: Definition[], codeAt: number): 
   }
   for (const item of touched) {
     above(item.line - 1, item.name);
-    // The last index is the line after the function. It closes a comment run. A docstring may end there, but that line is not a comment inside the function.
+    // The end index closes a comment run and is not inside the function.
     const past = item.line - 1 + item.code.split('\n').length;
     let start = -1;
     let quote = '';

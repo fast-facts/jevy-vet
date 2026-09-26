@@ -5,8 +5,8 @@ import { type ProjectIndex } from './project.ts';
 import { type Settings } from './settings.ts';
 import { type Change, stripComments } from './subjects.ts';
 
-// Jev allows 32k tokens for state plus the longest question, and 64k for state plus all questions.
-// A token is at least 3 characters of code, so these stay well inside both.
+// Jev caps state plus longest question at 32k tokens, and state plus all questions at 64k.
+// A token is at least 3 code chars, so these stay well inside both.
 export const MAX_QUESTIONS = 100;
 export const MAX_EDIT_SIDE_CHARS = 6000;
 const GATE_CONTEXT_LINES = 5;
@@ -20,26 +20,26 @@ export interface ReviewDeps {
   log?: (message: string) => void;
   // Where to read the code under test. Without it, only the new text is sent.
   disk?: Disk;
-  // The shared project listing for retrieval. Without it, one is built from disk per call.
+  // Shared project listing. Without it, one is built from disk per call.
   project?: ProjectIndex;
-  // The user's latest messages in this session, oldest first. Empty when unknown.
+  // Latest user messages, oldest first. Empty when unknown.
   userMessages?: string[];
-  // Earlier blocks, so the user can allow one and a retry loop is noticed.
+  // Earlier blocks, so the user can allow one and retry loops are noticed.
   history?: History;
-  // Receives a note for tests and checks Jev is unsure about. The plugin adds it to the tool output.
+  // Note for unsure tests and checks. Added to the tool output.
   warn?: (note: string) => void;
-  // Test clock for the answer cache. Production uses the real time.
+  // Test clock. Production uses real time.
   now?: () => number;
 }
 
-// What the plugin remembers for the session the user talks to. A subagent shares its parent's.
+// What the plugin remembers per session the user talks to. A subagent shares its parent's.
 export interface History {
   // By file and test. Deleted when that test passes or the user allows it.
   blocks: Map<string, Block>;
-  // The user's latest real messages, oldest first, and how many there have been in all.
+  // Latest real user messages, oldest first, plus how many there have been.
   messages: string[];
   messageCount: number;
-  // The last command that failed, so Jev can see what a change to a check may hide.
+  // Last failed command, so Jev sees what a check change may hide.
   lastFailure?: Failure;
 }
 
@@ -50,11 +50,11 @@ export interface Failure {
 }
 
 export interface Block {
-  // The part of the block message for this test, shown to Jev when the user may have allowed it.
+  // Block text for this test, shown to Jev when the user may have allowed it.
   message: string;
   // Blocks in a row for this test.
   count: number;
-  // messageCount when it was blocked. Only later messages can allow it.
+  // messageCount when blocked. Only later messages can allow it.
   atMessage: number;
 }
 
@@ -74,7 +74,7 @@ export type Question = { type: 'noul'; instructions: string; criteria: { true: s
 
 export const MAX_LATEST_MESSAGE_CHARS = 1000;
 
-// Code judgments see only the latest user message, so history does not repeat in every request.
+// Code judgments see only the latest user message.
 export function latestUserMessages(messages: string[]): string[] {
   if (messages.length === 0) return [];
   return [headTail(messages[messages.length - 1] ?? '', MAX_LATEST_MESSAGE_CHARS).text];
@@ -91,7 +91,7 @@ export function userAsked(change: string, asks: string): Question {
   };
 }
 
-// Several requests can fail the same way. Log each message once.
+// Several requests can fail the same way. Each message logs once.
 export function logOnce(deps: ReviewDeps): ReviewDeps {
   const logged = new Set<string>();
   return {
@@ -123,7 +123,7 @@ export async function callTypeSafe(
     deps.log?.(message);
     return;
   };
-    // Exact body is the key.
+  // Exact body is the key.
   const body = JSON.stringify({
     model: 'jev-latest',
     state: batch.state,
@@ -132,7 +132,7 @@ export async function callTypeSafe(
   const digest = createHash('sha256').update(body).digest('hex');
   const now = deps.now?.() ?? Date.now();
   const cached = cachedAnswers.get(digest);
-  // A hit logs nothing, like a fresh success. Only failures log.
+  // A hit logs nothing. Only failures log.
   if (cached && now - cached.at <= ANSWER_TTL_MS) return cached.answers;
   if (cached) cachedAnswers.delete(digest);
   // Concurrent identical requests share one fetch.
@@ -231,7 +231,7 @@ function scoreIsSure(score: unknown, confidence: unknown): boolean {
   return typeof confidence !== 'number' || confidence >= SURE;
 }
 
-// Sure blocks. From 0.5 up to sure, or sure with low confidence, only adds a note.
+// Sure blocks. 0.5 to sure, or sure with low confidence, only notes.
 export type Level = 'block' | 'warn' | undefined;
 
 function levelOf(score: unknown, confidence: unknown): Level {
@@ -274,7 +274,7 @@ export function ignoredPath(path: string): boolean {
   return /(?:^|[\\/])node_modules[\\/]/.test(path) || /(?:^|[\\/])jevy-vet\.jsonc?$/.test(path);
 }
 
-// A change sends only the lines that differ and a few around them, so the change is not cut out of the middle.
+// A change sends only differing lines plus a few around them.
 export function sides(change: { old?: string; new: string }): { old?: string; new: string } {
   if (change.old === undefined) return { new: headTail(change.new, MAX_EDIT_SIDE_CHARS).text };
   const before = change.old.split('\n');
@@ -295,7 +295,7 @@ export function shownPath(root: string, path: string): string {
   return relative(root, resolve(root, path)).split(sep).join('/');
 }
 
-// A patch with several hunks in one file cannot be placed, so it has no line numbers.
+// A multi-hunk patch cannot be placed, so it has no line numbers.
 export function afterChange(change: Change, onDisk: string | undefined): string | undefined {
   if (change.old === undefined || change.old === '') return change.new;
   if (onDisk?.includes(change.old)) return onDisk.replace(change.old, () => change.new);

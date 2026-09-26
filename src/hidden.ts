@@ -2,8 +2,7 @@ import { isGenerated } from './context.ts';
 import { afterChange, askedFor, callTypeSafe, cut, type Failure, type Finding, ignoredPath, latestUserMessages, listed, logOnce, noulIsSure, type Question, reader, type ReviewDeps, shownPath, sides, userAsked } from './jev.ts';
 import { type Change, changesFrom, definitionsIn, isDefinitionFile, isTestSupport } from './subjects.ts';
 
-// The hidden-error check. It notes and never blocks: code that keeps going after a failure is sometimes the design.
-// It notes only when Jev is sure, like the reuse check.
+// Notes, never blocks. Staying quiet after a failure is sometimes the design.
 const MAX_HIDDEN_CHANGES = 5;
 const MAX_HIDDEN_LINES = 3;
 const HIDDEN_RULE = 'Hidden error: The change lets a failure pass silently instead of handling it or reporting it.';
@@ -12,9 +11,7 @@ const HIDDEN_CRITERIA = {
   true: 'It swallows an exception with an empty or log-only catch and goes on as if it worked, catches broadly and returns a default or a fake success, adds `?.`, `??`, or `|| []` to silence a crash that `last_failure` or a test showed, removes a throw or an error return, ignores a returned error (for example Go `_ = err`, or Rust `let _ =` or `unwrap_or_default()`), or turns an error into a warning.',
   false: 'The error is rethrown or wrapped with context, handled by a real recovery the caller expects, part of documented best-effort code such as cleanup, telemetry, or an optional feature, or logged and still reported to the caller.',
 };
-// Scope only, like touchesGates. Not a finding.
-// Added: a handler, an error word, an ignored result or binding, an optional or empty default, or a warning.
-// Removed: a throw, or an error return.
+// Scope only. Added: a handler, an error word, an ignored result, an empty default, or a warning. Removed: a throw or error return.
 const ADDED_ERROR_LINE = [
   /\b(?:catch|except|rescue|recover|finally)\b/,
   /\berr(?:or)?s?\b/i,
@@ -60,8 +57,7 @@ export interface HiddenPrep {
   finish: (answers: Record<string, unknown> | undefined) => string | undefined;
 }
 
-// The changed files are read before the first await, so the caller must invoke
-// this without awaiting anything else first. It does no network itself.
+// Reads disk before the first await. Call without awaiting first. No network.
 export async function prepareHiddenErrors(tool: string, args: unknown, deps: HiddenDeps): Promise<HiddenPrep | undefined> {
   const disk = deps.disk;
   if (!disk) return;
@@ -78,7 +74,7 @@ export async function prepareHiddenErrors(tool: string, args: unknown, deps: Hid
     const removed = oldLines.filter(line => line !== '' && !newLines.includes(line) && REMOVED_ERROR_LINE.some(pattern => pattern.test(line)));
     const line = added[0] ?? removed[0];
     if (line === undefined) continue;
-    // The file after the edit is tried first. A removed line is only in the file as it was.
+    // The file after the edit is tried first.
     let name = 'top-level code';
     for (const text of [afterChange(change, onDisk) ?? change.new, onDisk ?? change.old ?? '']) {
       const inside = definitionsIn(text, change.path).filter(item => item.code.includes(line)).at(-1)?.name;
@@ -124,7 +120,6 @@ export async function prepareHiddenErrors(tool: string, args: unknown, deps: Hid
   };
 }
 
-// Thin wrapper: prepare, one request, finish. Kept so the single-check path stays the same.
 export async function checkHiddenErrors(tool: string, args: unknown, deps: HiddenDeps): Promise<string | undefined> {
   const prep = await prepareHiddenErrors(tool, args, deps);
   if (!prep) return;

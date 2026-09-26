@@ -22,7 +22,6 @@ describe('reuse check', () => {
     '/repo/src/day.snap.ts': `${TO_ISO_DAY}\n`,
   };
 
-  // Lists folders as well as files, the way readdir does.
   interface ReuseBody {
     state: {
       purpose: string;
@@ -109,7 +108,7 @@ describe('reuse check', () => {
     }
   });
 
-  test('skips a move or a refactor that removes the old copy in the same call', async () => {
+  test('skips code the same call removes or moves', async () => {
     const moved = [
       '*** Begin Patch',
       '*** Update File: src/date.ts',
@@ -127,10 +126,7 @@ describe('reuse check', () => {
     const renamed = run('edit', { filePath: 'src/date.ts', oldString: TO_ISO_DAY, newString: FORMAT_DAY }, { r0_x0_duplicates: sure }, { files });
     expect(await renamed.result).toBeUndefined();
     expect(renamed.bodies).toHaveLength(0);
-  });
-
-  test('does not offer code the same call removes', async () => {
-    const files = { ...project, '/repo/src/other.ts': 'export function isoDay(when: Date): string {\n  const text = when.toISOString();\n  return text.slice(0, 10);\n}\n' };
+    const replaced = { ...project, '/repo/src/other.ts': 'export function isoDay(when: Date): string {\n  const text = when.toISOString();\n  return text.slice(0, 10);\n}\n' };
     const patchText = [
       '*** Begin Patch',
       '*** Update File: src/other.ts',
@@ -146,7 +142,7 @@ describe('reuse check', () => {
       ...FORMAT_DAY.split('\n').map(line => `+${line}`),
       '*** End Patch',
     ].join('\n');
-    const asked = run('apply_patch', { patchText }, {}, { files });
+    const asked = run('apply_patch', { patchText }, {}, { files: replaced });
     await asked.result;
     expect(asked.bodies[0]?.state.existing.map(item => item.name)).toEqual(['toIsoDay']);
   });

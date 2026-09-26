@@ -4,8 +4,7 @@ import { callTypeSafe, ignoredPath, latestUserMessages, logOnce, MAX_QUESTIONS, 
 import { type Settings } from './settings.ts';
 import { type Change, changesFrom } from './subjects.ts';
 
-// The instruction check. It warns and never blocks: a rule read from prose is a guess, and
-// the user may have changed their mind in a way this plugin cannot see.
+// Warns, never blocks: a rule read from prose is a guess.
 const MAX_INSTRUCTIONS = 20;
 const MAX_FILE_SENTENCES = 150;
 const MAX_SENTENCES_PER_REQUEST = 100;
@@ -15,19 +14,18 @@ const MAX_CACHED_SENTENCES = 2000;
 const MAX_CHANGES = 10;
 const MAX_WARNINGS = 5;
 
-// Off by default: when on, chat.message reads the key before any tool runs,
-// earlier than the key rule allows. Open question whether that breaks the rule.
+// Off: when on, chat.message reads the key before any tool runs.
 export const CLASSIFY_ON_MESSAGE = false;
 
 export interface SentenceDeps extends ReviewDeps {
   // Answers by sentence. true means a rule worth checking.
   cache: Map<string, boolean>;
-  // Sentences being classified now. The check awaits these instead of asking again.
+  // Sentences now classifying. The check awaits these instead of asking again.
   sentenceInflight?: Map<string, Promise<void>>;
 }
 
 export interface InstructionDeps extends SentenceDeps {
-  // Instruction files that apply to the changed paths, global first and nearest last.
+  // Files for the changed paths, global first and nearest last.
   instructionFiles: (paths: string[]) => InstructionFile[];
 }
 
@@ -55,7 +53,7 @@ export interface RuleRequest {
 export interface InstructionPrep {
   requests: RuleRequest[];
   finish: (results: (Record<string, unknown> | undefined)[]) => string | undefined;
-  // Shared with the wrapper, so sentence and rule failures log one line.
+  // Shared with the wrapper, so failures log one line.
   once: ReviewDeps;
   settings: Settings;
 }
@@ -152,7 +150,7 @@ export async function startSentenceClassification(sentences: Sentence[], deps: S
     })();
     for (const sentence of chunk) shared.set(sentence.key, run);
     waits.push(run);
-    // A settled chunk leaves the map. A later turn asks again only on a cache miss.
+    // A settled chunk leaves the map; a later turn asks again only on a cache miss.
     void run.finally(() => {
       for (const sentence of chunk) if (shared.get(sentence.key) === run) shared.delete(sentence.key);
     });

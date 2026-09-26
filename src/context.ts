@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { splitCases, stripComments, type TestFile } from './subjects.ts';
 
-// Context read from disk for one test file. None of it is judged.
+// Context read from disk for one test file. Not judged.
 interface Source {
   path: string;
   text: string;
@@ -30,13 +30,12 @@ const MAX_CODE_FILES = 6;
 const JS_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
 export function contextFor(file: TestFile, disk: Disk | undefined): FileContext {
-  const newSetup = file.setup;
-  if (!disk) return withSetup(newSetup, [], file.path);
+  if (!disk) return withSetup(file.setup, [], file.path);
 
   const testPath = isAbsolute(file.path) ? resolve(file.path) : resolve(disk.root, file.path);
-  // An edit, or a fragment with no setup, may leave the imports only on disk.
-  const onDisk = file.edited || newSetup === '' ? disk.read(testPath) : undefined;
-  const setup = newSetup === '' && onDisk !== undefined ? splitCases(onDisk).setup : newSetup;
+  // An edit, or a fragment with no setup, may leave imports only on disk.
+  const onDisk = file.edited || file.setup === '' ? disk.read(testPath) : undefined;
+  const setup = file.setup === '' && onDisk !== undefined ? splitCases(onDisk).setup : file.setup;
   const source = `${file.source}\n${onDisk ?? ''}`;
 
   const code: Source[] = [];
@@ -113,7 +112,7 @@ function jsImports(source: string): string[] {
 
 function jsFiles(target: string): string[] {
   const ext = extname(target);
-  // `from './b.js'` in TypeScript is the same file as b.ts. Drop that extension before trying the others.
+  // `from './b.js'` in TypeScript is the same file as b.ts. Drop that extension first.
   const jsSpecifier = ext === '.js' || ext === '.mjs' || ext === '.cjs' || ext === '.jsx';
   const stem = jsSpecifier ? target.slice(0, -ext.length) : target;
   const files = JS_EXTS.includes(ext) ? [target] : [];
@@ -138,7 +137,7 @@ function pyFiles(mod: string, dir: string, root: string): string[] {
     for (let i = 1; i < dots; i += 1) base = dirname(base);
     bases.push(base);
   } else {
-    // No leading dots: try each folder from the test up to the project root, then root/src.
+    // No leading dots: try each folder from the test up to the root, then root/src.
     for (let base = dir; inside(root, base); base = dirname(base)) {
       bases.push(base);
       if (base === root || dirname(base) === base) break;
@@ -216,7 +215,7 @@ function inside(root: string, path: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel) && !rel.split(sep).includes('node_modules'));
 }
 
-// Default disk access. Missing, unreadable, or huge files count as absent.
+// Default disk access. Missing, unreadable, or huge files are absent.
 export function readSource(path: string): string | undefined {
   try {
     if (statSync(path).size > MAX_FILE_BYTES) return;
@@ -234,8 +233,7 @@ export function listDir(dir: string): string[] {
   }
 }
 
-// Instruction files, found the way OpenCode 1 finds them (packages/opencode/src/session/instruction.ts).
-// Read as the rules an edit is checked against. Never judged themselves.
+// Instruction files, found the way OpenCode 1 finds them. Read as rules, never judged.
 export interface InstructionFile {
   path: string;
   text: string;
@@ -256,7 +254,7 @@ const MAX_INSTRUCTION_FILE_CHARS = 8000;
 const MAX_INSTRUCTION_CHARS = 24_000;
 const MAX_GLOB_MATCHES = 20;
 
-// Order: global, project, configured, then the files nearest each changed file. Later is more specific.
+// Order: global, project, configured, then files nearest each change. Later is more specific.
 export function instructionFilesFor(changedPaths: string[], places: InstructionPlaces, disk: Disk): InstructionFile[] {
   const flag = (name: string) => ['true', '1'].includes((places.env[name] ?? '').toLowerCase());
   const claude = !flag('OPENCODE_DISABLE_CLAUDE_CODE') && !flag('OPENCODE_DISABLE_CLAUDE_CODE_PROMPT');
@@ -273,7 +271,7 @@ export function instructionFilesFor(changedPaths: string[], places: InstructionP
 
   const names = INSTRUCTION_NAMES.filter(name => claude || name !== 'CLAUDE.md');
   if (project) {
-    // The first name found anywhere between the project folder and the worktree wins, and every copy of it counts.
+    // First name found between project folder and worktree wins; every copy counts.
     for (const name of names) {
       const found: string[] = [];
       for (let dir = root; ; dir = dirname(dir)) {
