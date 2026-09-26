@@ -1,8 +1,10 @@
-import { type ReviewDeps } from './jev.ts';
+import { clearAnswerCache, type ReviewDeps } from './jev.ts';
 import { type AsyncDisk } from './project.ts';
 import { type Settings } from './settings.ts';
 
 export function deps(fetchImpl: ReviewDeps['fetch'], settings: Partial<Settings> = { key: 'ts_secret' }, disk?: ReviewDeps['disk']): ReviewDeps & { logs: string[]; loads: number } {
+  // Each helper starts empty, so one test never answers another.
+  clearAnswerCache();
   const logs: string[] = [];
   let loads = 0;
   return {
@@ -48,7 +50,7 @@ export function memoryDisk(files: Record<string, string>, root = '/repo') {
   };
 }
 
-// Async disk over an in-memory tree. stat versions only move on write, so an
+// Async disk over an in-memory tree. Versions move only on write, so an
 // untouched file is read once and a written one is re-read.
 export function asyncTreeDisk(files: Record<string, string>, root = '/repo') {
   const listCalls: string[] = [];
@@ -93,7 +95,7 @@ export function asyncTreeDisk(files: Record<string, string>, root = '/repo') {
   };
 }
 
-// Lists folders as well as files, the way readdir does.
+// Lists folders as well as files, like readdir.
 export function treeDisk(files: Record<string, string>) {
   const reads: string[] = [];
   return {

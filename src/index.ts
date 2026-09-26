@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { checkClaims, type Step } from './claims.ts';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
 import { checkHiddenErrors } from './hidden.ts';
-import { checkInstructions } from './instructions.ts';
+import { checkInstructions, CLASSIFY_ON_MESSAGE, type Sentence, type SentenceDeps, startSentenceClassification, userSentences } from './instructions.ts';
 import { type Block, type Failure, shownPath } from './jev.ts';
 import { checkNotes, notesMerged } from './notes.ts';
 import { productionAsyncDisk, ProjectIndex } from './project.ts';
@@ -64,6 +64,19 @@ const KEEP_STEPS = 30;
 const MAX_STEP_OUTPUT_CHARS = 1000;
 // Enough to find the last user message behind a long run of tool steps.
 const READ_MESSAGES = 50;
+// How long the after hook waits for a note before letting the result through.
+const NOTE_WAIT_MS = 1500;
+// A late note lives until the next user message or this long.
+const LATE_TTL_MS = 5 * 60 * 1000;
+const MAX_LATE_NOTES = 20;
+
+// A note that arrived after its own result. It rides on the next result in the same session.
+interface LateNote {
+  path: string;
+  at: number;
+  done: boolean;
+  text?: string;
+}
 
 // Blocks useless test writes, weakened checks, and special-cased tests. Notes unsure ones, broken instructions, repeated code, hidden errors, and stale comments.
 // When the session goes idle, it checks the agent's last message against what it did. It calls TypeSafe directly.
@@ -87,6 +100,12 @@ export default async function jevyVet(input: Input) {
   let configured: string[] = [];
   const sentences = new Map<string, boolean>();
   const pending = new Map<string, Promise<string | undefined>>();
+  // Notes that missed their own result, by top session.
+  const late = new Map<string, LateNote[]>();
+  // Sentence classification already running. The check awaits these.
+  const sentenceInflight = new Map<string, Promise<void>>();
+  // Message count warmed per top session, so warming starts once per turn.
+  const warmed = new Map<string, number>();
   // Commands and edits per top-level session since the user's last message, for the claim check.
   const steps = new Map<string, Step[]>();
   // Earlier turns, so a summary of committed work still counts as backed.
@@ -127,6 +146,73 @@ export default async function jevyVet(input: Input) {
   };
   const append = (map: Map<string, Step[]>, session: string, added: Step[]) => remember(map, session, [...map.get(session) ?? [], ...added].slice(-KEEP_STEPS));
   const record = (session: string, step: Step) => append(steps, session, [step]);
+  const instructionFiles = (paths: string[]) => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk);
+  // Drop waiting late notes with one line. Never the note text.
+  const dropLate = (top: string, why: string) => {
+    const waiting = late.get(top);
+    if (!waiting || waiting.length === 0) return;
+    late.delete(top);
+    log(`Dropped ${waiting.length} late note(s) for this session (${why}).`);
+  };
+  // Keep a slow note for the next result. Drop the oldest past 20.
+  const keepLate = (top: string, hook: { tool: string }, edited: string[], check: Promise<string | undefined>) => {
+    const entry: LateNote = { path: edited.length > 0 ? edited.join(', ') : hook.tool, at: Date.now(), done: false };
+    void check.then(text => {
+      entry.done = true;
+      entry.text = text;
+    }, () => {
+      entry.done = true;
+    });
+    let waiting = late.get(top);
+    if (!waiting) {
+      waiting = [];
+      late.set(top, waiting);
+      if (late.size > KEEP_SESSIONS) {
+        const oldest = late.keys().next().value;
+        if (oldest !== undefined && oldest !== top) late.delete(oldest);
+      }
+    }
+    waiting.push(entry);
+    if (waiting.length > MAX_LATE_NOTES) {
+      const dropped = waiting.length - MAX_LATE_NOTES;
+      waiting.splice(0, dropped);
+      log(`Dropped ${dropped} late note(s) for this session (too many waiting).`);
+    }
+  };
+  // Carry arrived late notes on this result. Pending ones stay for a later result.
+  const flushLate = (top: string, output: { output: string }) => {
+    const waiting = late.get(top);
+    if (!waiting || waiting.length === 0) return;
+    const now = Date.now();
+    const kept: LateNote[] = [];
+    const ready: LateNote[] = [];
+    let stale = 0;
+    for (const entry of waiting) {
+      if (now - entry.at > LATE_TTL_MS) {
+        stale += 1;
+        continue;
+      }
+      if (!entry.done) {
+        kept.push(entry);
+        continue;
+      }
+      if (entry.text) ready.push(entry);
+    }
+    if (stale > 0) log(`Dropped ${stale} late note(s) for this session (too old).`);
+    if (kept.length === 0) late.delete(top);
+    else late.set(top, kept);
+    for (const entry of ready) output.output = `${output.output}\n\nNote on your earlier change to ${entry.path}:\n\n${entry.text}`;
+  };
+  // Start classifying new sentences without waiting. File sentences stay on the
+  // per-call lookup, so this adds no extra reads. The key is still read before any write.
+  const startWarming = (candidates: Sentence[], userMessages: string[]) => {
+    const fresh = candidates.filter(sentence => !sentences.has(sentence.key) && !sentenceInflight.has(sentence.key));
+    if (fresh.length === 0) return;
+    const settings = load();
+    if (settings.error || settings.key.trim() === '') return;
+    const warming: SentenceDeps = { load, fetch: globalThis.fetch, disk, log: undefined, project, userMessages, cache: sentences, sentenceInflight };
+    void startSentenceClassification(fresh, warming, settings).catch(() => undefined);
+  };
   const checkTurn = async (session: string) => {
     // A subagent reports to its parent agent, not to the user.
     if (parents.has(session)) return;
@@ -207,6 +293,10 @@ export default async function jevyVet(input: Input) {
           counts.delete(oldest);
         }
       }
+      // A new turn. Late notes are stale. Only a top-level message drops them.
+      if (!parents.has(hook.sessionID)) dropLate(hook.sessionID, 'new user message');
+      // Flag is off, so this does not read the key before a tool runs.
+      if (CLASSIFY_ON_MESSAGE) startWarming(userSentences([text]), kept);
       return Promise.resolve();
     },
     'tool.execute.before': async (hook: { tool: string; sessionID?: string; callID?: string }, output: { args: unknown }) => {
@@ -221,6 +311,12 @@ export default async function jevyVet(input: Input) {
         project,
       };
       const top = topOf(session);
+      // Classify the turn's user sentences while the tool runs. Once per turn, any tool.
+      if (!CLASSIFY_ON_MESSAGE && (warmed.get(top) ?? -1) !== (counts.get(top) ?? 0)) {
+        remember(warmed, top, counts.get(top) ?? 0);
+        const topMessages = messages.get(top) ?? [];
+        if (topMessages.length > 0) startWarming(userSentences(topMessages), topMessages);
+      }
       // A block in a subagent is answered by the user in the top session, so blocks are kept there.
       let sessionBlocks = blocks.get(top);
       if (!sessionBlocks) {
@@ -241,14 +337,13 @@ export default async function jevyVet(input: Input) {
       if (reason) throw new Error(reason);
       if (!hook.callID) return;
       // Started now so they run while the tool does. The after hook adds the notes.
-      const instructionFiles = (paths: string[]) => instructionFilesFor(paths, { worktree, home: homedir(), env: process.env, configured, glob: globFiles }, disk);
-      // The merged path sends one TypeSafe request for all four note checks.
-      // Off by default until a live A/B shows it keeps precision.
+      // The merged path sends one request for all four note checks. Off by default.
       if (notesMerged()) {
         pending.set(hook.callID, checkNotes(hook.tool, output.args, {
           ...shared,
           userMessages: messages.get(top) ?? [],
           cache: sentences,
+          sentenceInflight,
           instructionFiles,
           lastFailure: failures.get(top),
         }).then(note => {
@@ -261,6 +356,7 @@ export default async function jevyVet(input: Input) {
           ...shared,
           userMessages: messages.get(top) ?? [],
           cache: sentences,
+          sentenceInflight,
           instructionFiles,
         }).catch(() => undefined);
         const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: messages.get(top) ?? [] }).catch(() => undefined);
@@ -294,11 +390,26 @@ export default async function jevyVet(input: Input) {
       // The next view re-reads what this call changed. After a bash call the listing may be stale too.
       if (edited.length > 0) project.markStale(edited);
       if (commandFrom(hook.tool, hook.args)) project.markListingStale();
+      // Late notes that arrived since ride on this result.
+      flushLate(top, output);
       const check = pending.get(hook.callID);
       if (!check) return;
       pending.delete(hook.callID);
-      const note = await check;
-      if (note) output.output = `${output.output}\n\n${note}`;
+      // Wait at most NOTE_WAIT_MS. A slow note rides on the next result instead.
+      let settled = false;
+      void check.finally(() => {
+        settled = true;
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const note = await Promise.race([check, new Promise<undefined>(resolve => {
+          timer = setTimeout(() => resolve(undefined), NOTE_WAIT_MS);
+        })]);
+        if (note) output.output = `${output.output}\n\n${note}`;
+        else if (!settled) keepLate(top, hook, edited, check);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     },
   };
 }

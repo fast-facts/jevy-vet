@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { type Disk, headTail } from './context.ts';
 import { type ProjectIndex } from './project.ts';
@@ -27,6 +28,8 @@ export interface ReviewDeps {
   history?: History;
   // Receives a note for tests and checks Jev is unsure about. The plugin adds it to the tool output.
   warn?: (note: string) => void;
+  // Test clock for the answer cache. Production uses the real time.
+  now?: () => number;
 }
 
 // What the plugin remembers for the session the user talks to. A subagent shares its parent's.
@@ -112,38 +115,81 @@ export async function callTypeSafe(
     deps.log?.(message);
     return;
   };
+    // Exact body is the key.
+  const body = JSON.stringify({
+    model: 'jev-latest',
+    state: batch.state,
+    questions: batch.questions,
+  });
+  const digest = createHash('sha256').update(body).digest('hex');
+  const now = deps.now?.() ?? Date.now();
+  const cached = cachedAnswers.get(digest);
+  // A hit logs nothing, like a fresh success. Only failures log.
+  if (cached && now - cached.at <= ANSWER_TTL_MS) return cached.answers;
+  if (cached) cachedAnswers.delete(digest);
+  // Concurrent identical requests share one fetch.
+  const flying = flyingAnswers.get(digest);
+  if (flying) return flying;
 
-  let response: Response;
-  try {
-    response = await deps.fetch(`${base}/v1/systemone`, {
-      method: 'POST',
-      redirect: 'error',
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'jev-latest',
-        state: batch.state,
-        questions: batch.questions,
-      }),
-    });
-  } catch {
-    return allow(`TypeSafe request failed. ${allowed}`);
-  }
-  if (!response.ok) return allow(`TypeSafe returned ${response.status}. ${allowed}`);
+  const run = (async (): Promise<Record<string, unknown> | undefined> => {
+    let response: Response;
+    try {
+      response = await deps.fetch(`${base}/v1/systemone`, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(20_000),
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+      });
+    } catch {
+      return allow(`TypeSafe request failed. ${allowed}`);
+    }
+    if (!response.ok) return allow(`TypeSafe returned ${response.status}. ${allowed}`);
 
-  let body: unknown;
+    let parsed: unknown;
+    try {
+      parsed = await response.json();
+    } catch {
+      return allow(`TypeSafe returned an unreadable response. ${allowed}`);
+    }
+    if (!isRecord(parsed) || !isRecord(parsed.answers)) {
+      return allow(`TypeSafe returned no answers. ${allowed}`);
+    }
+    while (cachedAnswers.size >= MAX_CACHED_ANSWERS) {
+      const oldest = cachedAnswers.keys().next().value;
+      if (oldest === undefined) break;
+      cachedAnswers.delete(oldest);
+    }
+    cachedAnswers.set(digest, { answers: parsed.answers, at: deps.now?.() ?? Date.now() });
+    return parsed.answers;
+  })();
+  flyingAnswers.set(digest, run);
   try {
-    body = await response.json();
-  } catch {
-    return allow(`TypeSafe returned an unreadable response. ${allowed}`);
+    return await run;
+  } finally {
+    flyingAnswers.delete(digest);
   }
-  if (!isRecord(body) || !isRecord(body.answers)) {
-    return allow(`TypeSafe returned no answers. ${allowed}`);
-  }
-  return body.answers;
+}
+
+// Identical bodies share one answer, so a retry costs no extra call.
+const MAX_CACHED_ANSWERS = 500;
+const ANSWER_TTL_MS = 30 * 60 * 1000;
+
+interface CachedAnswer {
+  answers: Record<string, unknown>;
+  at: number;
+}
+
+const cachedAnswers = new Map<string, CachedAnswer>();
+const flyingAnswers = new Map<string, Promise<Record<string, unknown> | undefined>>();
+
+// Tests only. Production keeps answers for the process.
+export function clearAnswerCache(): void {
+  cachedAnswers.clear();
+  flyingAnswers.clear();
 }
 
 // 0.5 or higher on the user-intent question allows it, before any block.

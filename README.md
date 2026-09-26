@@ -126,7 +126,7 @@ It also tells the agent it can ask you. If you allow the change in a later messa
 
 After three blocks in a row on the same test, file, or command, the message tells the agent to stop retrying and ask you. One that passes starts the count over.
 
-When Jev leans toward a problem but is not sure, the test is written and the same list is added to what the tool returns, as a note.
+When Jev leans toward a problem but is not sure, the test is written and the same list is added to what the tool returns, as a note. When TypeSafe is slow, a note may arrive with the next tool result instead, marked as a note on an earlier change.
 
 ## Your instructions
 

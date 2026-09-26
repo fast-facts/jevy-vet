@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { deps, jsonResponse, memoryDisk } from './fakes.test.ts';
-import { checkInstructions, type InstructionDeps } from './instructions.ts';
+import { checkInstructions, CLASSIFY_ON_MESSAGE, type InstructionDeps, startSentenceClassification, userSentences } from './instructions.ts';
 import { type ReviewDeps } from './jev.ts';
 import { type Settings } from './settings.ts';
 
@@ -205,5 +205,67 @@ describe('instruction check', () => {
     const note = await checkInstructions('edit', edit, instructionDeps(fetchImpl, { files: { '/repo/AGENTS.md': many } }));
     expect(note?.split('\n').filter(line => line.startsWith('- '))).toHaveLength(6);
     expect(note).toContain('- and 3 more');
+  });
+
+  test('leaves early classification off by default', () => {
+    expect(CLASSIFY_ON_MESSAGE).toBe(false);
+  });
+
+  const EARLY_MESSAGES = ['Do not change `src/api.ts` signatures.'];
+  const EARLY_SETTINGS: Settings = { key: 'ts_secret', baseUrl: '', path: '/cfg' };
+
+  // Deps share one cache and one in-flight map, so early work is awaited, not asked again.
+  function warmingDeps(fetchImpl: ReviewDeps['fetch'], cache: Map<string, boolean>, files?: Record<string, string>) {
+    const sentenceInflight = new Map<string, Promise<void>>();
+    const wired = (withFiles?: Record<string, string>) => {
+      const used = instructionDeps(fetchImpl, { messages: EARLY_MESSAGES, cache, files: withFiles });
+      used.sentenceInflight = sentenceInflight;
+      return used;
+    };
+    return { early: wired(), later: wired(files), settings: EARLY_SETTINGS };
+  }
+
+  test('uses sentences classified early instead of asking again', async () => {
+    const { sent, fetchImpl } = judge(breaks(rule => rule.includes('signatures')));
+    const cache = new Map<string, boolean>();
+    const { early, later, settings } = warmingDeps(fetchImpl, cache, { '/repo/AGENTS.md': AGENTS });
+    await startSentenceClassification(userSentences(EARLY_MESSAGES), early, settings);
+    const note = await checkInstructions('edit', edit, later);
+    expect(note).toContain('may break an instruction');
+    const asked = sent.flatMap(body => body.state.sentences ?? []).filter(item => item.from === 'user_messages[0]');
+    expect(asked).toHaveLength(1);
+  });
+
+  test('awaits an early classification instead of asking twice', async () => {
+    let release!: (response: Response) => void;
+    const held = new Promise<Response>(resolve => {
+      release = resolve;
+    });
+    let calls = 0;
+    const bodies: { state: { sentences?: { from: string; text: string }[] }; questions: Record<string, unknown> }[] = [];
+    const fetchImpl: ReviewDeps['fetch'] = (_url, init) => {
+      calls += 1;
+      const body = JSON.parse(String(init.body)) as (typeof bodies)[number];
+      bodies.push(body);
+      if (calls === 1) return held;
+      // Rule check, asked after the sentences arrive.
+      const answers: Record<string, unknown> = {};
+      for (const id of Object.keys(body.questions)) answers[id] = { type: 'noul', noul: id.endsWith('_lifted') ? 0.1 : 0.9 };
+      return Promise.resolve(jsonResponse({ model: 'jev-latest', answers }));
+    };
+    const cache = new Map<string, boolean>();
+    const { early, later, settings } = warmingDeps(fetchImpl, cache);
+    const warming = startSentenceClassification(userSentences(EARLY_MESSAGES), early, settings);
+    const checking = checkInstructions('edit', edit, later);
+    // The check waits on the early request. No second sentence fetch.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    release(jsonResponse({ model: 'jev-latest', answers: { s0_limits: { type: 'noul', noul: 0.95 }, s0_style: { type: 'noul', noul: 0.05 } } }));
+    await warming;
+    const note = await checking;
+    expect(calls).toBe(2);
+    expect(bodies.filter(body => body.state.sentences)).toHaveLength(1);
+    expect(note).toContain('may break "Do not change `src/api.ts` signatures."');
   });
 });

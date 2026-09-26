@@ -13,20 +13,28 @@ const MAX_CACHED_SENTENCES = 2000;
 const MAX_CHANGES = 10;
 const MAX_WARNINGS = 5;
 
-export interface InstructionDeps extends ReviewDeps {
-  // Instruction files that apply to the changed paths, global first and nearest last.
-  instructionFiles: (paths: string[]) => InstructionFile[];
-  // Answers by sentence, kept for the plugin's lifetime. true means a rule worth checking.
+// Off by default: when on, chat.message reads the key before any tool runs,
+// earlier than the key rule allows. Open question whether that breaks the rule.
+export const CLASSIFY_ON_MESSAGE = false;
+
+export interface SentenceDeps extends ReviewDeps {
+  // Answers by sentence. true means a rule worth checking.
   cache: Map<string, boolean>;
+  // Sentences being classified now. The check awaits these instead of asking again.
+  sentenceInflight?: Map<string, Promise<void>>;
 }
 
-interface Sentence {
+export interface InstructionDeps extends SentenceDeps {
+  // Instruction files that apply to the changed paths, global first and nearest last.
+  instructionFiles: (paths: string[]) => InstructionFile[];
+}
+
+export interface Sentence {
   key: string;
   text: string;
   // An instruction file path, or `user_messages[n]`.
   from: string;
 }
-
 interface SentenceRequest {
   state: { purpose: string; user_messages?: string[]; sentences: { from: string; text: string }[] };
   questions: Record<string, Question>;
@@ -50,9 +58,8 @@ export interface InstructionPrep {
   settings: Settings;
 }
 
-// Reads the disk before its first await, so a `write` is compared with the file as it was before the write.
-// The sentence requests stay separate and run first; only the rule questions are returned for merging.
-// With silentSentences the sentence failures stay quiet, so one combined failure logs one line.
+// Reads the disk before its first await, so a `write` is compared with the file as it was.
+// Sentence requests stay separate and run first; only rule questions are returned for merging.
 export async function prepareInstructions(tool: string, args: unknown, deps: InstructionDeps, silentSentences = false): Promise<InstructionPrep | undefined> {
   const root = deps.disk?.root ?? '';
   const changes = changesFrom(tool, args, reader(deps.disk)).filter(change => !ignoredPath(change.path)).slice(0, MAX_CHANGES);
@@ -64,46 +71,23 @@ export async function prepareInstructions(tool: string, args: unknown, deps: Ins
   const settings = deps.load();
   if (settings.error || settings.key.trim() === '') return;
   const once = logOnce(deps);
-  const allowed = 'No instruction note was added.';
 
   const show = (path: string) => (root && isAbsolute(path) ? relative(root, path) : path) || path;
   const fromFiles: Sentence[] = [];
   for (const file of files) {
     for (const text of sentencesOf(file.text)) fromFiles.push({ key: `file\n${text}`, text, from: show(file.path) });
   }
-  const fromUser: Sentence[] = [];
-  for (const [n, message] of userMessages.entries()) {
-    for (const text of sentencesOf(message)) fromUser.push({ key: `user\n${text}`, text, from: `user_messages[${n}]` });
-  }
-  // The same sentence is asked once. The first copy wins.
   const sentences: Sentence[] = [];
   const seen = new Set<string>();
-  for (const sentence of [...fromFiles.slice(-MAX_FILE_SENTENCES), ...fromUser]) {
+  for (const sentence of [...fromFiles.slice(-MAX_FILE_SENTENCES), ...userSentences(userMessages)]) {
     if (seen.has(sentence.key)) continue;
     seen.add(sentence.key);
     sentences.push(sentence);
   }
 
-  // Each sentence is asked once per plugin lifetime. These requests stay separate.
-  const unknown = sentences.filter(sentence => !deps.cache.has(sentence.key));
-  const chunks: Sentence[][] = [];
-  for (let start = 0; start < unknown.length; start += MAX_SENTENCES_PER_REQUEST) chunks.push(unknown.slice(start, start + MAX_SENTENCES_PER_REQUEST));
-  const sentenceDeps = silentSentences ? { ...deps, log: undefined } : once;
-  await Promise.all(chunks.map(async chunk => {
-    const request = sentenceRequest(chunk, userMessages);
-    const answers = await callTypeSafe(sentenceDeps, settings, request, allowed);
-    for (const [n, sentence] of chunk.entries()) {
-      const limits = noulScore(answers?.[`s${n}_limits`]);
-      const style = noulScore(answers?.[`s${n}_style`]);
-      // A missing answer is asked again next time, not remembered as "not a rule".
-      if (limits === undefined || style === undefined) continue;
-      deps.cache.set(sentence.key, limits >= 0.5 && style < 0.5);
-      if (deps.cache.size > MAX_CACHED_SENTENCES) {
-        const oldest = deps.cache.keys().next().value;
-        if (oldest !== undefined) deps.cache.delete(oldest);
-      }
-    }
-  }));
+  // Sentence requests run first. An early start warms the same keys, so this awaits them.
+  const sentenceDeps: SentenceDeps = silentSentences ? { ...deps, log: undefined } : { ...deps, log: once.log };
+  await startSentenceClassification(sentences, sentenceDeps, settings);
 
   const rules = sentences.filter(sentence => deps.cache.get(sentence.key) === true).slice(-MAX_INSTRUCTIONS);
   if (rules.length === 0) return;
@@ -122,7 +106,58 @@ export async function prepareInstructions(tool: string, args: unknown, deps: Ins
   };
 }
 
-// Thin wrapper: prepare, one request per chunk, finish. Kept so the single-check path stays the same.
+// User sentences with the same keys the check uses, so an early request matches.
+export function userSentences(messages: string[]): Sentence[] {
+  const out: Sentence[] = [];
+  for (const [n, message] of messages.entries()) {
+    for (const text of sentencesOf(message)) out.push({ key: `user\n${text}`, text, from: `user_messages[${n}]` });
+  }
+  return out;
+}
+
+// Same request as the check, so an early start hits the answer cache.
+export async function startSentenceClassification(sentences: Sentence[], deps: SentenceDeps, settings: Settings): Promise<void> {
+  const userMessages = deps.userMessages ?? [];
+  const shared = deps.sentenceInflight ?? new Map<string, Promise<void>>();
+  const fresh: Sentence[] = [];
+  const waits: Promise<void>[] = [];
+  for (const sentence of sentences) {
+    const found = shared.get(sentence.key);
+    if (found) {
+      waits.push(found);
+      continue;
+    }
+    if (deps.cache.has(sentence.key)) continue;
+    fresh.push(sentence);
+  }
+  const chunks: Sentence[][] = [];
+  for (let start = 0; start < fresh.length; start += MAX_SENTENCES_PER_REQUEST) chunks.push(fresh.slice(start, start + MAX_SENTENCES_PER_REQUEST));
+  for (const chunk of chunks) {
+    const request = sentenceRequest(chunk, userMessages);
+    const run = (async (): Promise<void> => {
+      const answers = await callTypeSafe(deps, settings, request, 'No instruction note was added.');
+      for (const [n, sentence] of chunk.entries()) {
+        const limits = noulScore(answers?.[`s${n}_limits`]);
+        const style = noulScore(answers?.[`s${n}_style`]);
+        // A missing answer is asked again next time.
+        if (limits === undefined || style === undefined) continue;
+        deps.cache.set(sentence.key, limits >= 0.5 && style < 0.5);
+        if (deps.cache.size > MAX_CACHED_SENTENCES) {
+          const oldest = deps.cache.keys().next().value;
+          if (oldest !== undefined) deps.cache.delete(oldest);
+        }
+      }
+    })();
+    for (const sentence of chunk) shared.set(sentence.key, run);
+    waits.push(run);
+    // A settled chunk leaves the map. A later turn asks again only on a cache miss.
+    void run.finally(() => {
+      for (const sentence of chunk) if (shared.get(sentence.key) === run) shared.delete(sentence.key);
+    });
+  }
+  await Promise.all(waits);
+}
+
 export async function checkInstructions(tool: string, args: unknown, deps: InstructionDeps): Promise<string | undefined> {
   const prep = await prepareInstructions(tool, args, deps);
   if (!prep) return;

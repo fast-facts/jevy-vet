@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import plugin from './index.ts';
+import { CLASSIFY_ON_MESSAGE } from './instructions.ts';
+import { clearAnswerCache } from './jev.ts';
 import { setNotesMerged } from './notes.ts';
 
 const USEFUL = 'test(\'adds\', () => { expect(add(1, 2)).toBe(3) })';
@@ -54,6 +56,8 @@ async function usingPlugin(
   }
   globalThis.fetch = fetchImpl as typeof fetch;
   try {
+    // Each run starts empty, so one test never answers another.
+    clearAnswerCache();
     await run(await plugin({ directory: directory ?? join(root, 'project'), client: { app: { log }, ...client } }));
   } finally {
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -241,7 +245,10 @@ describe('plugin', () => {
         await hooks['chat.message']({ sessionID: 'child' }, { parts: [{ type: 'text', text: 'Update the expected value.' }] });
         await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
         await before(hooks, 'edit', edit);
+        // Same body twice. Ask again so both are recorded.
+        clearAnswerCache();
         await hooks['tool.execute.before']({ tool: 'edit', sessionID: 'child' }, { args: edit });
+        clearAnswerCache();
         await hooks['tool.execute.before']({ tool: 'edit', sessionID: 'other' }, { args: edit });
       }, undefined, project);
     } finally {
@@ -490,8 +497,11 @@ describe('plugin', () => {
         await before(hooks, 'edit', skipLint);
         // A command that did not finish has no exit code and changes nothing.
         await after('s', 'bun run lint', null, 'terminated');
+        // Same body. Ask again so every check is recorded.
+        clearAnswerCache();
         await before(hooks, 'edit', skipLint);
         await after('s', 'bun run lint', 0, 'ok');
+        clearAnswerCache();
         await before(hooks, 'edit', skipLint);
       });
       const failures = bodies.map(body => (JSON.parse(body) as { state: { last_failure?: unknown } }).state.last_failure);
@@ -630,6 +640,301 @@ describe('plugin', () => {
       }
       expect(bodies).toHaveLength(1);
       expect(bodies[0]?.state.changes?.[0]?.test_line).toBe('tests/price.test.ts:4 expect(total(42)).toBe(210);');
+    });
+  });
+  describe('late notes', () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const tick = () => new Promise<void>(resolve => realSetTimeout(() => resolve(), 5));
+
+    // Let held fetches answer: sentences first, then the rules they unlock.
+    async function settle(held: { releaseAll: () => void }) {
+      held.releaseAll();
+      await tick();
+      held.releaseAll();
+      await tick();
+      await tick();
+      await tick();
+    }
+
+    interface LateSent {
+      state: { sentences?: { text: string }[] };
+      questions: Record<string, unknown>;
+    }
+
+    function strictAnswers(body: LateSent): Record<string, unknown> {
+      const answers: Record<string, unknown> = {};
+      for (const id of Object.keys(body.questions)) {
+        const n = Number(/^s(\d+)_/.exec(id)?.[1]);
+        if (id.endsWith('_limits')) answers[id] = { type: 'noul', noul: /Do not/.test(body.state.sentences?.[n]?.text ?? '') ? 0.9 : 0.1 };
+        else if (id.endsWith('_style')) answers[id] = { type: 'noul', noul: 0.1 };
+        else if (id.endsWith('_breaks')) answers[id] = { type: 'noul', noul: 0.9 };
+        else answers[id] = { type: 'noul', noul: 0.1 };
+      }
+      return answers;
+    }
+
+    // The after hook races the note against a timer. Shrink it so tests stay fast.
+    async function withFastTimer(run: (delays: number[]) => Promise<void>) {
+      const saved = globalThis.setTimeout;
+      const delays: number[] = [];
+      const stub = (...args: Parameters<typeof setTimeout>): ReturnType<typeof setTimeout> => {
+        delays.push(Number(args[1]));
+        return saved(args[0], Math.min(Number(args[1]) || 0, 10));
+      };
+      Object.defineProperty(globalThis, 'setTimeout', { value: stub, writable: true, configurable: true });
+      try {
+        await run(delays);
+      } finally {
+        Object.defineProperty(globalThis, 'setTimeout', { value: saved, writable: true, configurable: true });
+      }
+    }
+
+    async function withClock(run: (advance: (ms: number) => void) => Promise<void>) {
+      const saved = Date.now;
+      let now = saved();
+      Date.now = () => now;
+      try {
+        await run(ms => {
+          now += ms;
+        });
+      } finally {
+        Date.now = saved;
+      }
+    }
+
+    // Fetch that only answers when the test says so.
+    function heldFetch() {
+      const waiting: { resolve: (response: Response) => void; body: LateSent }[] = [];
+      const fetchImpl: FakeFetch = (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as LateSent;
+        return new Promise<Response>(resolve => {
+          waiting.push({ resolve, body });
+        });
+      };
+      const releaseAll = () => {
+        for (const item of waiting.splice(0)) item.resolve(jsonResponse({ answers: strictAnswers(item.body) }));
+      };
+      return { fetchImpl, releaseAll };
+    }
+
+    function lateProject() {
+      return withProject({ 'AGENTS.md': '- Do not edit src.', 'src/api.ts': 'export const a = 1' });
+    }
+
+    function lateArgs(project: string) {
+      return { filePath: join(project, 'src/api.ts'), content: 'export const a = 2' };
+    }
+
+    function result() {
+      return { title: '', output: 'Wrote file', metadata: {} };
+    }
+
+    function logCapture() {
+      const logs: string[] = [];
+      const log: PluginLog = input => {
+        logs.push(input.body.message);
+        return Promise.resolve(undefined);
+      };
+      return { logs, log };
+    }
+
+    test('appends a late note to the next result in the same session', async () => {
+      const project = lateProject();
+      const held = heldFetch();
+      try {
+        await withFastTimer(async delays => {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', held.fetchImpl, async hooks => {
+            const args = lateArgs(project);
+            await before(hooks, 'write', args);
+            const first = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, first);
+            // Slow TypeSafe, so the result went out without the note.
+            expect(first.output).toBe('Wrote file');
+            expect(delays).toContain(1500);
+            await settle(held);
+            const other = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 'other', callID: 'o', args }, other);
+            expect(other.output).toBe('Wrote file');
+            const second = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c2', args }, second);
+            expect(second.output).toContain('Note on your earlier change to src/api.ts:');
+            expect(second.output).toContain('may break an instruction');
+          }, undefined, project);
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+    });
+
+    test('appends a subagent late note on the parent session', async () => {
+      const project = lateProject();
+      const held = heldFetch();
+      try {
+        await withFastTimer(async () => {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', held.fetchImpl, async hooks => {
+            await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'child', parentID: 's' } } } });
+            const args = lateArgs(project);
+            await hooks['tool.execute.before']({ tool: 'write', sessionID: 'child', callID: 'c' }, { args });
+            const first = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 'child', callID: 'c', args }, first);
+            expect(first.output).toBe('Wrote file');
+            await settle(held);
+            const parent = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c2', args }, parent);
+            expect(parent.output).toContain('Note on your earlier change to src/api.ts:');
+          }, undefined, project);
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+    });
+
+    test('keeps a still-pending late note for a later result', async () => {
+      const project = lateProject();
+      const held = heldFetch();
+      try {
+        await withFastTimer(async () => {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', held.fetchImpl, async hooks => {
+            const args = lateArgs(project);
+            await before(hooks, 'write', args);
+            const first = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, first);
+            expect(first.output).toBe('Wrote file');
+            const second = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c2', args }, second);
+            expect(second.output).toBe('Wrote file');
+            await settle(held);
+            const third = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c3', args }, third);
+            expect(third.output).toContain('Note on your earlier change to src/api.ts:');
+          }, undefined, project);
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+    });
+
+    test('drops a late note on the next user message and logs once', async () => {
+      const project = lateProject();
+      const held = heldFetch();
+      const { logs, log } = logCapture();
+      try {
+        await withFastTimer(async () => {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', held.fetchImpl, async hooks => {
+            const args = lateArgs(project);
+            await before(hooks, 'write', args);
+            const first = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, first);
+            expect(first.output).toBe('Wrote file');
+            await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Thanks.' }] });
+            await settle(held);
+            const second = result();
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c2', args }, second);
+            expect(second.output).toBe('Wrote file');
+          }, log, project);
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      expect(logs).toHaveLength(1);
+      expect(logs.join('\n')).not.toContain('Do not edit src.');
+    });
+
+    test('drops a late note older than 5 minutes', async () => {
+      const project = lateProject();
+      const held = heldFetch();
+      const { logs, log } = logCapture();
+      try {
+        await withClock(async advance => {
+          await withFastTimer(async () => {
+            await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', held.fetchImpl, async hooks => {
+              const args = lateArgs(project);
+              await before(hooks, 'write', args);
+              const first = result();
+              await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, first);
+              expect(first.output).toBe('Wrote file');
+              advance(5 * 60 * 1000 + 1);
+              await settle(held);
+              const other = result();
+              await hooks['tool.execute.after']({ tool: 'write', sessionID: 'other', callID: 'o', args }, other);
+              expect(other.output).toBe('Wrote file');
+              const second = result();
+              await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c2', args }, second);
+              expect(second.output).toBe('Wrote file');
+            }, log, project);
+          });
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      expect(logs).toHaveLength(1);
+      expect(logs.join('\n')).not.toContain('Do not edit src.');
+    });
+
+    test('keeps only the newest 20 late notes, oldest first', async () => {
+      const project = withProject({ 'AGENTS.md': '- Do not edit src.' });
+      // Held until the end, so every note is still waiting at the 21st.
+      const held = heldFetch();
+      const { logs, log } = logCapture();
+      try {
+        await withFastTimer(async () => {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', held.fetchImpl, async hooks => {
+            for (let n = 0; n < 21; n += 1) {
+              const args = { filePath: join(project, `src/f${n}.ts`), content: 'export const v = true' };
+              await hooks['tool.execute.before']({ tool: 'write', sessionID: 's', callID: `c${n}` }, { args });
+              const out = { title: '', output: 'ok', metadata: {} };
+              await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: `c${n}`, args }, out);
+              expect(out.output).toBe('ok');
+            }
+            await settle(held);
+            const last = { title: '', output: 'ok', metadata: {} };
+            const args = { filePath: join(project, 'src/f20.ts'), content: 'export const v = true' };
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'done', args }, last);
+            expect(last.output.split('Note on your earlier change to')).toHaveLength(21);
+            expect(last.output).not.toContain('src/f0.ts');
+            expect(last.output).toContain('src/f20.ts');
+          }, log, project);
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+      expect(logs.join('\n')).toContain('too many waiting');
+    });
+
+    test('never waits longer than the note budget', async () => {
+      const project = lateProject();
+      // Never answers. The timer ends the wait.
+      const hold: FakeFetch = () => new Promise<Response>(() => undefined);
+      try {
+        await withFastTimer(async delays => {
+          await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', hold, async hooks => {
+            const args = lateArgs(project);
+            await before(hooks, 'write', args);
+            const start = Date.now();
+            const out = { title: '', output: 'Wrote file', metadata: {} };
+            await hooks['tool.execute.after']({ tool: 'write', sessionID: 's', callID: 'c', args }, out);
+            expect(out.output).toBe('Wrote file');
+            expect(Date.now() - start).toBeLessThan(1500);
+            expect(delays).toEqual([1500]);
+          }, undefined, project);
+        });
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+    });
+
+    test('sends no fetch from chat.message with early classification off', async () => {
+      expect(CLASSIFY_ON_MESSAGE).toBe(false);
+      let calls = 0;
+      const fetchImpl: FakeFetch = () => {
+        calls += 1;
+        return Promise.resolve(jsonResponse({ answers: {} }));
+      };
+      await usingPlugin('{ "TYPESAFE_API_KEY": "ts_secret" }', fetchImpl, async hooks => {
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Do not edit src/api.ts.' }] });
+        await hooks['chat.message']({ sessionID: 's' }, { parts: [{ type: 'text', text: 'Thanks.' }] });
+      });
+      expect(calls).toBe(0);
     });
   });
   describe('claim check', () => {
