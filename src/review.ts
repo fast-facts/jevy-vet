@@ -11,7 +11,8 @@ const MAX_STATE_CHARS = 72_000;
 const MAX_BATCH_SETUP_CHARS = 2_000;
 const MAX_BATCH_CODE_CHARS = 6_000;
 const MAX_BATCH_CODE_FILE_CHARS = 4_000;
-const MAX_EDITS_PER_REQUEST = 25;
+const MAX_EDITS_PER_REQUEST = 50;
+const MAX_EDIT_BATCH_SIDE_CHARS = 2_000;
 // Both sides of each change, so five stay inside MAX_STATE_CHARS.
 const MAX_GATES_PER_REQUEST = 5;
 
@@ -512,7 +513,7 @@ function editBatches(edits: Edit[], userMessages: string[], files: TestFile[], r
     const questions: Record<string, Question> = {};
     for (const edit of chunk) {
       const at = `edits[${sent.length}]`;
-      const side = (text: string) => headTail(stripComments(text, edit.path), MAX_EDIT_SIDE_CHARS).text;
+      const side = (text: string) => headTail(stripComments(text, edit.path), MAX_EDIT_BATCH_SIDE_CHARS).text;
       const moved = movedTests(edit, edits, files);
       const onDisk = read(edit.path);
       const rawSetup = onDisk === undefined ? '' : splitCases(onDisk).setup;

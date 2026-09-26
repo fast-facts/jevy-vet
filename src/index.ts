@@ -3,7 +3,7 @@ import { checkClaims, type Step } from './claims.ts';
 import { globFiles, headTail, instructionFilesFor, listDir, readSource } from './context.ts';
 import { checkHiddenErrors } from './hidden.ts';
 import { checkInstructions, CLASSIFY_ON_MESSAGE, type Sentence, type SentenceDeps, startSentenceClassification, userSentences } from './instructions.ts';
-import { type Block, type Failure, isRecord, shownPath } from './jev.ts';
+import { type Block, type Failure, isRecord, latestUserMessages, shownPath } from './jev.ts';
 import { checkNotes, notesMerged } from './notes.ts';
 import { productionAsyncDisk, ProjectIndex } from './project.ts';
 import { review } from './review.ts';
@@ -341,10 +341,12 @@ export default async function jevyVet(input: Input) {
         project,
       };
       const top = topOf(session);
-      // Classify the turn's user sentences while the tool runs. Once per turn, any tool.
+      // Classify the turn's user sentences while a write runs, once per turn.
       // One copy shared by the review and note checks below, so the same user text is read once.
       const topMessages = messages.get(top) ?? [];
-      if (!CLASSIFY_ON_MESSAGE && (warmed.get(top) ?? -1) !== (counts.get(top) ?? 0)) {
+      // One trimmed copy for intent questions; instructions keep the full history.
+      const intentMessages = latestUserMessages(topMessages);
+      if (!CLASSIFY_ON_MESSAGE && ['write', 'edit', 'apply_patch'].includes(hook.tool) && (warmed.get(top) ?? -1) !== (counts.get(top) ?? 0)) {
         remember(warmed, top, counts.get(top) ?? 0);
         if (topMessages.length > 0) startWarming(userSentences(topMessages), topMessages);
       }
@@ -361,7 +363,7 @@ export default async function jevyVet(input: Input) {
       const notes: string[] = [];
       const reason = await review(hook.tool, output.args, {
         ...shared,
-        userMessages: parents.has(session) ? [] : messages.get(session) ?? [],
+        userMessages: parents.has(session) ? [] : intentMessages,
         history: { blocks: sessionBlocks, messages: topMessages, messageCount: counts.get(top) ?? 0, lastFailure: failures.get(top) },
         warn: note => notes.push(note),
       });
@@ -390,9 +392,9 @@ export default async function jevyVet(input: Input) {
           sentenceInflight,
           instructionFiles,
         }).catch(() => undefined);
-        const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: topMessages }).catch(() => undefined);
-        const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: topMessages, lastFailure: failures.get(top) }).catch(() => undefined);
-        const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: topMessages }).catch(() => undefined);
+        const reuse = checkReuse(hook.tool, output.args, { ...shared, userMessages: intentMessages }).catch(() => undefined);
+        const hidden = checkHiddenErrors(hook.tool, output.args, { ...shared, userMessages: intentMessages, lastFailure: failures.get(top) }).catch(() => undefined);
+        const stale = checkStaleDocs(hook.tool, output.args, { ...shared, userMessages: intentMessages }).catch(() => undefined);
         pending.set(hook.callID, Promise.all([instruction, reuse, hidden, stale]).then(found => {
           const parts = [...notes];
           for (const note of found) if (note) parts.push(note);

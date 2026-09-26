@@ -7,8 +7,8 @@ import { changesFrom, type Definition, definitionsIn, isDefinitionFile } from '.
 // Notes, never blocks. Candidates are the closest word matches, so a better one can be missed.
 const MAX_NEW_DEFINITIONS = 5;
 const MAX_CANDIDATES = 3;
-const MAX_NEW_CODE_CHARS = 3000;
-const MAX_CANDIDATE_CHARS = 2000;
+const MAX_NEW_CODE_CHARS = 1500;
+const MAX_CANDIDATE_CHARS = 1000;
 const MIN_SHARED_WORDS = 3;
 const MIN_OVERLAP = 0.2;
 // This much shared body with a removed function means a move.

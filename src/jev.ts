@@ -111,6 +111,13 @@ export function reader(disk: Disk | undefined): (path: string) => string | undef
   };
 }
 
+// Key order does not matter. Text stays as is.
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (isRecord(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]));
+  return value;
+}
+
 export async function callTypeSafe(
   deps: ReviewDeps,
   settings: Settings,
@@ -123,13 +130,14 @@ export async function callTypeSafe(
     deps.log?.(message);
     return;
   };
-  // Exact body is the key.
-  const body = JSON.stringify({
+  // Exact body is sent. The canonical form is only the cache key.
+  const payload = {
     model: 'jev-latest',
     state: batch.state,
     questions: batch.questions,
-  });
-  const digest = createHash('sha256').update(body).digest('hex');
+  };
+  const body = JSON.stringify(payload);
+  const digest = createHash('sha256').update(JSON.stringify(canonicalize(payload))).digest('hex');
   const now = deps.now?.() ?? Date.now();
   const cached = cachedAnswers.get(digest);
   // A hit logs nothing. Only failures log.
